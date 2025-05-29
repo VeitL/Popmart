@@ -1,0 +1,46 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+##Always respond in 中文;
+## ignore the bug: SwiftGen not installed, download from https://github.com/SwiftGen/SwiftGen;
+## after you create a new file , make sure it is added in the project.pbxproj. also when you delete a file , make sure remove it from prject.pbxproj.
+## Code Changes Best Practices
+- ALWAYS thoroughly review existing code before making any changes
+- Carefully analyze the potential impact of each modification
+- Ensure new code does not introduce conflicts with existing implementations
+- Verify all dependencies and imports are correctly set up
+- Run comprehensive tests before committing any changes
+- Prioritize code quality and stability over quick fixes
+- Seek to understand the full context of the codebase before making modifications
+when you run the code, always use :'platform=iOS Simulator,name=iPhone 16,OS=18.2'; 
+
+##everytime you think you finished all the debug, run the code and debug until there is no bugs.
+
+在每次请求生成代码时添加这些约束条件：
+---
+[代码规范]
+1. 严格遵循Swift 5.9类型安全规范
+
+
+
+# 采用增量验证流程
+2. 在Playground中验证核心逻辑
+4. 通过Xcode的⌃⌘⇧K执行Clean Build
+5. 使用Instruments进行内存分析
+
+
+## 安全开发流程
+
+1. 初始化环境（首次使用前）：
+bash
+./project-bootstrap.sh
+
+2. 提交代码前的自检：
+bash
+./preflight-check.sh --full
+
+3. 遇到规则冲突时的修复：
+bash
+./fix-violations.sh
