@@ -177,34 +177,122 @@ struct AddProductView: View {
     }
     
     private func addProduct() {
-        // 使用选中的变体URL（如果有），否则使用原始URL
-        let productURL = selectedVariantInfo?.url ?? url
-        let variantName = selectedVariantInfo?.variantName
-        let price = selectedVariantInfo?.price
-        let imageURL = selectedVariantInfo?.imageURL ?? productPageInfo?.imageURL
+        // 检查是否有多个变体被选择
+        let selectedVariants = availableVariants.filter { variant in
+            // 这里可以添加选择逻辑，现在先简单处理
+            return selectedVariantInfo?.variantName == variant.variantName
+        }
         
-        // 如果有变体名称，将其添加到商品名称中
-        let fullName = variantName != nil ? "\(name) - \(variantName!)" : name
-        
-        productMonitor.addProduct(
-            url: productURL,
-            name: fullName,
-            variant: selectedVariant,
-            imageURL: imageURL,
-            monitoringInterval: monitoringInterval,
-            autoStart: autoStart
-        )
-        
-        // 如果有价格信息，更新商品价格
-        if let price = price {
-            if let product = productMonitor.products.last {
+        if availableVariants.count > 1 {
+            // 多变体情况：创建VariantDetail数组
+            var variants: [VariantDetail] = []
+            
+            if selectedVariants.isEmpty {
+                // 如果没有特定选择，添加所有可用变体
+                for variantInfo in availableVariants {
+                    let variant = VariantDetail(
+                        variant: mapVariantInfoToProductVariant(variantInfo),
+                        name: variantInfo.variantName ?? "未知变体",
+                        price: variantInfo.price,
+                        isAvailable: variantInfo.isAvailable,
+                        url: variantInfo.url,
+                        imageURL: variantInfo.imageURL,
+                        sku: variantInfo.sku,
+                        stockLevel: variantInfo.stockLevel
+                    )
+                    variants.append(variant)
+                }
+                
+                // 添加多变体产品
+                productMonitor.addMultiVariantProduct(
+                    baseURL: url,
+                    name: name,
+                    variants: variants,
+                    imageURL: productPageInfo?.imageURL,
+                    monitoringInterval: monitoringInterval,
+                    autoStart: autoStart
+                )
+            } else {
+                // 只添加选中的变体作为单独的产品
+                let productURL = selectedVariantInfo?.url ?? url
+                let variantName = selectedVariantInfo?.variantName
+                let price = selectedVariantInfo?.price
+                let imageURL = selectedVariantInfo?.imageURL ?? productPageInfo?.imageURL
+                
+                let fullName = variantName != nil ? "\(name) - \(variantName!)" : name
+                
+                productMonitor.addProduct(
+                    url: productURL,
+                    name: fullName,
+                    variant: selectedVariant,
+                    imageURL: imageURL,
+                    monitoringInterval: monitoringInterval,
+                    autoStart: autoStart
+                )
+                
+                // 更新价格信息
+                if let price = price, let product = productMonitor.products.last {
+                    // 更新第一个变体的价格
+                    var updatedProduct = product
+                    if !updatedProduct.variants.isEmpty {
+                        updatedProduct.variants[0] = VariantDetail(
+                            variant: updatedProduct.variants[0].variant,
+                            name: updatedProduct.variants[0].name,
+                            price: price,
+                            isAvailable: updatedProduct.variants[0].isAvailable,
+                            url: updatedProduct.variants[0].url,
+                            imageURL: updatedProduct.variants[0].imageURL,
+                            sku: updatedProduct.variants[0].sku,
+                            stockLevel: updatedProduct.variants[0].stockLevel
+                        )
+                        productMonitor.updateProduct(updatedProduct)
+                    }
+                }
+            }
+        } else {
+            // 单变体情况：使用原有逻辑
+            let productURL = selectedVariantInfo?.url ?? url
+            let variantName = selectedVariantInfo?.variantName
+            let price = selectedVariantInfo?.price
+            let imageURL = selectedVariantInfo?.imageURL ?? productPageInfo?.imageURL
+            
+            let fullName = variantName != nil ? "\(name) - \(variantName!)" : name
+            
+            productMonitor.addProduct(
+                url: productURL,
+                name: fullName,
+                variant: selectedVariant,
+                imageURL: imageURL,
+                monitoringInterval: monitoringInterval,
+                autoStart: autoStart
+            )
+            
+            // 更新价格信息
+            if let price = price, let product = productMonitor.products.last {
+                // 更新第一个变体的价格
                 var updatedProduct = product
-                updatedProduct.price = price
-                productMonitor.updateProduct(updatedProduct)
+                if !updatedProduct.variants.isEmpty {
+                    updatedProduct.variants[0] = VariantDetail(
+                        variant: updatedProduct.variants[0].variant,
+                        name: updatedProduct.variants[0].name,
+                        price: price,
+                        isAvailable: updatedProduct.variants[0].isAvailable,
+                        url: updatedProduct.variants[0].url,
+                        imageURL: updatedProduct.variants[0].imageURL,
+                        sku: updatedProduct.variants[0].sku,
+                        stockLevel: updatedProduct.variants[0].stockLevel
+                    )
+                    productMonitor.updateProduct(updatedProduct)
+                }
             }
         }
         
         dismiss()
+    }
+    
+    // 新增：将ProductVariantInfo映射到ProductVariant
+    private func mapVariantInfoToProductVariant(_ variantInfo: ProductPageInfo.ProductVariantInfo) -> ProductVariant {
+        return variantInfo.variant
     }
 }
 

@@ -214,6 +214,7 @@ struct ProductRowView: View {
     @ObservedObject var productMonitor: ProductMonitor
     @State private var showingDetail = false
     @State private var showingSettings = false
+    @State private var showingVariants = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -227,7 +228,7 @@ struct ProductRowView: View {
                         .cornerRadius(8)
                     
                     VStack(alignment: .leading, spacing: 4) {
-                        // 商品名称和变体
+                        // 商品名称和变体信息
                         HStack {
                             Text(product.name)
                                 .font(.headline)
@@ -235,18 +236,38 @@ struct ProductRowView: View {
                             
                             Spacer()
                             
-                            // 变体标签
-                            HStack(spacing: 4) {
-                                Image(systemName: product.variant.icon)
-                                    .foregroundColor(.purple)
-                                Text(product.variant.displayName)
-                                    .font(.caption)
-                                    .foregroundColor(.purple)
+                            // 变体数量显示
+                            if product.variants.count > 1 {
+                                Button {
+                                    showingVariants = true
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "cube.box.fill")
+                                            .foregroundColor(.purple)
+                                        Text("\(product.variants.count)个变体")
+                                            .font(.caption)
+                                            .foregroundColor(.purple)
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.purple.opacity(0.1))
+                                    .cornerRadius(4)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                            } else {
+                                // 单变体标签
+                                HStack(spacing: 4) {
+                                    Image(systemName: product.variant.icon)
+                                        .foregroundColor(.purple)
+                                    Text(product.variant.displayName)
+                                        .font(.caption)
+                                        .foregroundColor(.purple)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.purple.opacity(0.1))
+                                .cornerRadius(4)
                             }
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.purple.opacity(0.1))
-                            .cornerRadius(4)
                         }
                         
                         if let price = product.price {
@@ -266,6 +287,20 @@ struct ProductRowView: View {
                                     Text("监控中")
                                         .font(.caption)
                                         .foregroundColor(.blue)
+                                }
+                            }
+                            
+                            // 显示监控中的变体数量
+                            if product.variants.count > 1 {
+                                let monitoringCount = product.monitoringVariants.count
+                                if monitoringCount > 0 {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "eye.fill")
+                                            .foregroundColor(.orange)
+                                        Text("\(monitoringCount)个监控中")
+                                            .font(.caption)
+                                            .foregroundColor(.orange)
+                                    }
                                 }
                             }
                         }
@@ -309,7 +344,11 @@ struct ProductRowView: View {
             }
             .contentShape(Rectangle()) // 定义点击区域
             .onTapGesture {
-                showingDetail = true
+                if product.variants.count > 1 {
+                    showingVariants = true
+                } else {
+                    showingDetail = true
+                }
             }
             
             // 控制按钮区域 - 完全独立
@@ -357,6 +396,25 @@ struct ProductRowView: View {
                     }
                     .buttonStyle(PlainButtonStyle())
                     
+                    // 变体管理按钮（仅多变体时显示）
+                    if product.variants.count > 1 {
+                        Button {
+                            showingVariants = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "cube.box")
+                                Text("变体")
+                            }
+                            .font(.caption)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue)
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                    
                     // 设置按钮
                     Button {
                         showingSettings = true
@@ -387,6 +445,9 @@ struct ProductRowView: View {
         }
         .sheet(isPresented: $showingSettings) {
             ProductSettingsView(product: product, productMonitor: productMonitor)
+        }
+        .sheet(isPresented: $showingVariants) {
+            ProductVariantView(productMonitor: productMonitor, product: product)
         }
     }
     
