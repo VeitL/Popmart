@@ -602,59 +602,82 @@ class ProductMonitor: ObservableObject {
     private func extractAmazonSizeVariants(from html: String, baseURL: String) -> [ProductPageInfo.ProductVariantInfo]? {
         var variants: [ProductPageInfo.ProductVariantInfo] = []
         
-        // 查找size选择区域
+        // 查找size选择区域 - 扩展更多Amazon特有的模式
         let sizePatterns = [
+            // Amazon的尺寸选择器
             #"<ul[^>]*id="[^"]*size[^"]*"[^>]*>(.*?)</ul>"#,
             #"<div[^>]*class="[^"]*size[^"]*"[^>]*>(.*?)</div>"#,
-            #"Size:\s*<select[^>]*>(.*?)</select>"#
+            #"Size:\s*<select[^>]*>(.*?)</select>"#,
+            // Amazon的变体选择器模式
+            #"<div[^>]*id="[^"]*variation[^"]*"[^>]*>(.*?)</div>"#,
+            #"<ul[^>]*class="[^"]*a-unordered-list[^"]*"[^>]*>(.*?)</ul>"#,
+            #"<div[^>]*data-asin[^>]*>(.*?)</div>"#,
+            // 查找包含价格和选项的区域
+            #"<span[^>]*class="[^"]*dropdown[^"]*"[^>]*>(.*?)</span>"#
         ]
         
         for pattern in sizePatterns {
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
                 let range = NSRange(location: 0, length: html.count)
-                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                let matches = regex.matches(in: html, options: [], range: range)
+                
+                for match in matches {
                     if let sectionRange = Range(match.range(at: 1), in: html) {
                         let sectionHTML = String(html[sectionRange])
                         
-                        // 提取每个size选项
-                        let optionPattern = #"<li[^>]*>(.*?)</li>|<option[^>]*>(.*?)</option>|<span[^>]*data-csa-c-type="element"[^>]*data-csa-c-content="([^"]*)"[^>]*>(.*?)</span>"#
+                        // 提取每个选项 - 支持多种Amazon格式
+                        let optionPatterns = [
+                            // 标准列表项
+                            #"<li[^>]*>(.*?)</li>"#,
+                            #"<option[^>]*>(.*?)</option>"#,
+                            // Amazon特有的span元素
+                            #"<span[^>]*data-csa-c-type="element"[^>]*data-csa-c-content="([^"]*)"[^>]*>(.*?)</span>"#,
+                            #"<span[^>]*class="[^"]*selection[^"]*"[^>]*>(.*?)</span>"#,
+                            // 按钮式选择器
+                            #"<button[^>]*class="[^"]*size[^"]*"[^>]*>(.*?)</button>"#,
+                            #"<div[^>]*class="[^"]*option[^"]*"[^>]*>(.*?)</div>"#
+                        ]
                         
-                        if let optionRegex = try? NSRegularExpression(pattern: optionPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
-                            let optionRange = NSRange(location: 0, length: sectionHTML.count)
-                            let matches = optionRegex.matches(in: sectionHTML, options: [], range: optionRange)
-                            
-                            for optionMatch in matches {
-                                var optionText = ""
+                        for optionPattern in optionPatterns {
+                            if let optionRegex = try? NSRegularExpression(pattern: optionPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                                let optionRange = NSRange(location: 0, length: sectionHTML.count)
+                                let optionMatches = optionRegex.matches(in: sectionHTML, options: [], range: optionRange)
                                 
-                                // 检查哪个捕获组有内容
-                                for i in 1...optionMatch.numberOfRanges-1 {
-                                    if let range = Range(optionMatch.range(at: i), in: sectionHTML) {
-                                        let text = String(sectionHTML[range]).trimmingCharacters(in: .whitespacesAndNewlines)
-                                        if !text.isEmpty {
-                                            optionText = text
-                                            break
+                                for optionMatch in optionMatches {
+                                    var optionText = ""
+                                    
+                                    // 安全地检查哪个捕获组有内容
+                                    for i in 1..<optionMatch.numberOfRanges {
+                                        let rangeAtIndex = optionMatch.range(at: i)
+                                        if rangeAtIndex.location != NSNotFound,
+                                           let range = Range(rangeAtIndex, in: sectionHTML) {
+                                            let text = String(sectionHTML[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                                            if !text.isEmpty {
+                                                optionText = text
+                                                break
+                                            }
                                         }
                                     }
-                                }
-                                
-                                if !optionText.isEmpty {
-                                    let cleanedText = optionText
-                                        .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
-                                        .trimmingCharacters(in: .whitespacesAndNewlines)
                                     
-                                    if !cleanedText.isEmpty && cleanedText.count < 100 {
-                                        let variant = determineVariantFromAmazonOption(cleanedText)
-                                        let variantInfo = ProductPageInfo.ProductVariantInfo(
-                                            variant: variant,
-                                            price: extractPriceFromOptionText(cleanedText),
-                                            isAvailable: true, // 假设所有选项都是可用的
-                                            url: baseURL,
-                                            imageURL: nil,
-                                            sku: nil,
-                                            stockLevel: nil,
-                                            variantName: cleanedText
-                                        )
-                                        variants.append(variantInfo)
+                                    if !optionText.isEmpty {
+                                        let cleanedText = optionText
+                                            .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                                        
+                                        if !cleanedText.isEmpty && cleanedText.count < 100 && !cleanedText.lowercased().contains("select") {
+                                            let variant = determineVariantFromAmazonOption(cleanedText)
+                                            let variantInfo = ProductPageInfo.ProductVariantInfo(
+                                                variant: variant,
+                                                price: extractPriceFromOptionText(cleanedText),
+                                                isAvailable: true,
+                                                url: baseURL,
+                                                imageURL: nil,
+                                                sku: nil,
+                                                stockLevel: nil,
+                                                variantName: cleanedText
+                                            )
+                                            variants.append(variantInfo)
+                                        }
                                     }
                                 }
                             }
@@ -662,6 +685,11 @@ class ProductMonitor: ObservableObject {
                     }
                 }
             }
+        }
+        
+        // 如果仍然没有找到变体，尝试从页面标题或描述中提取
+        if variants.isEmpty {
+            variants = extractVariantsFromTitle(html: html, baseURL: baseURL)
         }
         
         return variants.isEmpty ? nil : variants
@@ -719,29 +747,39 @@ class ProductMonitor: ObservableObject {
             if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
                 let range = NSRange(location: 0, length: html.count)
                 if let match = regex.firstMatch(in: html, options: [], range: range) {
-                    if match.numberOfRanges >= 3 {
-                        // 处理分离的货币符号、整数和小数部分
+                    let numberOfRanges = match.numberOfRanges
+                    
+                    if numberOfRanges >= 4 {
+                        // 处理分离的货币符号、整数和小数部分 (3个捕获组)
                         if let currencyRange = Range(match.range(at: 1), in: html),
                            let wholeRange = Range(match.range(at: 2), in: html),
                            let fractionRange = Range(match.range(at: 3), in: html) {
-                            let currency = String(html[currencyRange])
-                            let whole = String(html[wholeRange])
-                            let fraction = String(html[fractionRange])
+                            let currency = String(html[currencyRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            let whole = String(html[wholeRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            let fraction = String(html[fractionRange]).trimmingCharacters(in: .whitespacesAndNewlines)
                             return "\(currency)\(whole).\(fraction)"
                         }
-                    } else if match.numberOfRanges >= 2 {
-                        // 处理整数和小数部分
+                    } else if numberOfRanges >= 3 {
+                        // 处理整数和小数部分 (2个捕获组)
                         if let wholeRange = Range(match.range(at: 1), in: html),
                            let fractionRange = Range(match.range(at: 2), in: html) {
-                            let whole = String(html[wholeRange])
-                            let fraction = String(html[fractionRange])
+                            let whole = String(html[wholeRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                            let fraction = String(html[fractionRange]).trimmingCharacters(in: .whitespacesAndNewlines)
                             return "€\(whole).\(fraction)"
                         }
-                    } else {
-                        // 处理完整价格
+                    } else if numberOfRanges >= 2 {
+                        // 处理完整价格 (1个捕获组)
                         if let priceRange = Range(match.range(at: 1), in: html) {
-                            let price = String(html[priceRange]).replacingOccurrences(of: ",", with: ".")
-                            return "€\(price)"
+                            let price = String(html[priceRange])
+                                .replacingOccurrences(of: ",", with: ".")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            
+                            // 如果价格不包含货币符号，添加€
+                            if !price.contains("€") && !price.contains("$") {
+                                return "€\(price)"
+                            } else {
+                                return price
+                            }
                         }
                     }
                 }
@@ -987,6 +1025,44 @@ class ProductMonitor: ObservableObject {
         for timer in productTimers.values {
             timer.invalidate()
         }
+    }
+    
+    // 从页面标题中提取变体信息的备用方法
+    private func extractVariantsFromTitle(html: String, baseURL: String) -> [ProductPageInfo.ProductVariantInfo] {
+        var variants: [ProductPageInfo.ProductVariantInfo] = []
+        
+        // 查找包含选项信息的文本
+        let titlePattern = #"<title>(.*?)</title>"#
+        if let regex = try? NSRegularExpression(pattern: titlePattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+            let range = NSRange(location: 0, length: html.count)
+            if let match = regex.firstMatch(in: html, options: [], range: range) {
+                if let titleRange = Range(match.range(at: 1), in: html) {
+                    let title = String(html[titleRange])
+                    
+                    // 检查标题中是否包含变体信息（如尺寸、数量等）
+                    let variationKeywords = ["pack", "set", "size", "piece", "count"]
+                    for keyword in variationKeywords {
+                        if title.lowercased().contains(keyword) {
+                            // 创建基于标题的默认变体
+                            let variant = ProductPageInfo.ProductVariantInfo(
+                                variant: .singleBox,
+                                price: extractAmazonPrice(from: html),
+                                isAvailable: extractAmazonAvailability(from: html),
+                                url: baseURL,
+                                imageURL: extractAmazonImageURL(from: html),
+                                sku: nil,
+                                stockLevel: nil,
+                                variantName: "默认选项"
+                            )
+                            variants.append(variant)
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        
+        return variants
     }
 }
 
