@@ -495,6 +495,12 @@ class ProductMonitor: ObservableObject {
     
     // 从HTML中提取商品信息
     private func extractProductPageInfo(from html: String, baseURL: String) -> ProductPageInfo? {
+        // 首先尝试Amazon解析
+        if baseURL.contains("amazon") {
+            return extractAmazonProductInfo(from: html, baseURL: baseURL)
+        }
+        
+        // 然后尝试Popmart解析
         guard let name = extractProductName(from: html) else {
             return nil
         }
@@ -510,6 +516,337 @@ class ProductMonitor: ObservableObject {
         )
         
         return info
+    }
+    
+    // MARK: - Amazon商品解析
+    private func extractAmazonProductInfo(from html: String, baseURL: String) -> ProductPageInfo? {
+        guard let name = extractAmazonProductName(from: html) else {
+            return nil
+        }
+        
+        let variants = extractAmazonVariants(from: html, baseURL: baseURL)
+        let imageURL = extractAmazonImageURL(from: html)
+        let description = extractAmazonDescription(from: html)
+        let brand = extractAmazonBrand(from: html)
+        
+        return ProductPageInfo(
+            name: name,
+            availableVariants: variants,
+            imageURL: imageURL,
+            description: description,
+            brand: brand,
+            category: nil
+        )
+    }
+    
+    private func extractAmazonProductName(from html: String) -> String? {
+        let namePatterns = [
+            #"<span[^>]*id="productTitle"[^>]*>(.*?)</span>"#,
+            #"<h1[^>]*id="title"[^>]*>(.*?)</h1>"#,
+            #"<meta[^>]*property="og:title"[^>]*content="([^"]+)""#,
+            #"<title>(.*?)</title>"#
+        ]
+        
+        for pattern in namePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    if let nameRange = Range(match.range(at: 1), in: html) {
+                        let name = String(html[nameRange])
+                            .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                            .replacingOccurrences(of: "&amp;", with: "&")
+                            .replacingOccurrences(of: "&quot;", with: "\"")
+                            .replacingOccurrences(of: "&lt;", with: "<")
+                            .replacingOccurrences(of: "&gt;", with: ">")
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        if !name.isEmpty && !name.contains("Amazon") {
+                            return name
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    private func extractAmazonVariants(from html: String, baseURL: String) -> [ProductPageInfo.ProductVariantInfo] {
+        var variants: [ProductPageInfo.ProductVariantInfo] = []
+        
+        // 尝试从size选择器中提取变体
+        if let sizeVariants = extractAmazonSizeVariants(from: html, baseURL: baseURL) {
+            variants.append(contentsOf: sizeVariants)
+        }
+        
+        // 如果没有找到变体，创建一个默认变体
+        if variants.isEmpty {
+            if let price = extractAmazonPrice(from: html) {
+                let defaultVariant = ProductPageInfo.ProductVariantInfo(
+                    variant: .singleBox,
+                    price: price,
+                    isAvailable: extractAmazonAvailability(from: html),
+                    url: baseURL,
+                    imageURL: extractAmazonImageURL(from: html),
+                    sku: nil,
+                    stockLevel: nil,
+                    variantName: "默认"
+                )
+                variants.append(defaultVariant)
+            }
+        }
+        
+        return variants
+    }
+    
+    private func extractAmazonSizeVariants(from html: String, baseURL: String) -> [ProductPageInfo.ProductVariantInfo]? {
+        var variants: [ProductPageInfo.ProductVariantInfo] = []
+        
+        // 查找size选择区域
+        let sizePatterns = [
+            #"<ul[^>]*id="[^"]*size[^"]*"[^>]*>(.*?)</ul>"#,
+            #"<div[^>]*class="[^"]*size[^"]*"[^>]*>(.*?)</div>"#,
+            #"Size:\s*<select[^>]*>(.*?)</select>"#
+        ]
+        
+        for pattern in sizePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    if let sectionRange = Range(match.range(at: 1), in: html) {
+                        let sectionHTML = String(html[sectionRange])
+                        
+                        // 提取每个size选项
+                        let optionPattern = #"<li[^>]*>(.*?)</li>|<option[^>]*>(.*?)</option>|<span[^>]*data-csa-c-type="element"[^>]*data-csa-c-content="([^"]*)"[^>]*>(.*?)</span>"#
+                        
+                        if let optionRegex = try? NSRegularExpression(pattern: optionPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                            let optionRange = NSRange(location: 0, length: sectionHTML.count)
+                            let matches = optionRegex.matches(in: sectionHTML, options: [], range: optionRange)
+                            
+                            for optionMatch in matches {
+                                var optionText = ""
+                                
+                                // 检查哪个捕获组有内容
+                                for i in 1...optionMatch.numberOfRanges-1 {
+                                    if let range = Range(optionMatch.range(at: i), in: sectionHTML) {
+                                        let text = String(sectionHTML[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+                                        if !text.isEmpty {
+                                            optionText = text
+                                            break
+                                        }
+                                    }
+                                }
+                                
+                                if !optionText.isEmpty {
+                                    let cleanedText = optionText
+                                        .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    
+                                    if !cleanedText.isEmpty && cleanedText.count < 100 {
+                                        let variant = determineVariantFromAmazonOption(cleanedText)
+                                        let variantInfo = ProductPageInfo.ProductVariantInfo(
+                                            variant: variant,
+                                            price: extractPriceFromOptionText(cleanedText),
+                                            isAvailable: true, // 假设所有选项都是可用的
+                                            url: baseURL,
+                                            imageURL: nil,
+                                            sku: nil,
+                                            stockLevel: nil,
+                                            variantName: cleanedText
+                                        )
+                                        variants.append(variantInfo)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        return variants.isEmpty ? nil : variants
+    }
+    
+    private func determineVariantFromAmazonOption(_ optionText: String) -> ProductVariant {
+        let lowercaseText = optionText.lowercased()
+        
+        switch true {
+        case lowercaseText.contains("pack") || lowercaseText.contains("set"):
+            return .wholeSet
+        case lowercaseText.contains("size"):
+            return .specific
+        case lowercaseText.contains("random"):
+            return .random
+        case lowercaseText.contains("limited") || lowercaseText.contains("special"):
+            return .limited
+        default:
+            return .singleBox
+        }
+    }
+    
+    private func extractPriceFromOptionText(_ text: String) -> String? {
+        let pricePatterns = [
+            #"€\s*(\d+[.,]\d{2})"#,
+            #"(\d+[.,]\d{2})\s*€"#,
+            #"\$\s*(\d+[.,]\d{2})"#,
+            #"(\d+[.,]\d{2})\s*\$"#
+        ]
+        
+        for pattern in pricePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let range = NSRange(location: 0, length: text.count)
+                if let match = regex.firstMatch(in: text, options: [], range: range) {
+                    if let priceRange = Range(match.range(at: 0), in: text) {
+                        return String(text[priceRange])
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    private func extractAmazonPrice(from html: String) -> String? {
+        let pricePatterns = [
+            #"<span[^>]*class="[^"]*price[^"]*"[^>]*><span[^>]*class="[^"]*currency[^"]*"[^>]*>([^<]+)</span><span[^>]*class="[^"]*whole[^"]*"[^>]*>([^<]+)</span><span[^>]*class="[^"]*fraction[^"]*"[^>]*>([^<]+)</span>"#,
+            #"<span[^>]*class="[^"]*a-price-whole[^"]*"[^>]*>([^<]+)</span><span[^>]*class="[^"]*a-price-fraction[^"]*"[^>]*>([^<]+)</span>"#,
+            #"<span[^>]*class="[^"]*a-price[^"]*"[^>]*>.*?€\s*(\d+[.,]\d{2})"#,
+            #"€\s*(\d+[.,]\d{2})"#,
+            #"(\d+[.,]\d{2})\s*€"#
+        ]
+        
+        for pattern in pricePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    if match.numberOfRanges >= 3 {
+                        // 处理分离的货币符号、整数和小数部分
+                        if let currencyRange = Range(match.range(at: 1), in: html),
+                           let wholeRange = Range(match.range(at: 2), in: html),
+                           let fractionRange = Range(match.range(at: 3), in: html) {
+                            let currency = String(html[currencyRange])
+                            let whole = String(html[wholeRange])
+                            let fraction = String(html[fractionRange])
+                            return "\(currency)\(whole).\(fraction)"
+                        }
+                    } else if match.numberOfRanges >= 2 {
+                        // 处理整数和小数部分
+                        if let wholeRange = Range(match.range(at: 1), in: html),
+                           let fractionRange = Range(match.range(at: 2), in: html) {
+                            let whole = String(html[wholeRange])
+                            let fraction = String(html[fractionRange])
+                            return "€\(whole).\(fraction)"
+                        }
+                    } else {
+                        // 处理完整价格
+                        if let priceRange = Range(match.range(at: 1), in: html) {
+                            let price = String(html[priceRange]).replacingOccurrences(of: ",", with: ".")
+                            return "€\(price)"
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    private func extractAmazonAvailability(from html: String) -> Bool {
+        let htmlLowercase = html.lowercased()
+        
+        let unavailableKeywords = [
+            "currently unavailable", "out of stock", "ausverkauft", "nicht verfügbar",
+            "temporarily out of stock", "vorübergehend nicht verfügbar"
+        ]
+        
+        let availableKeywords = [
+            "add to cart", "in den warenkorb", "buy now", "jetzt kaufen",
+            "add to basket", "in den einkaufswagen", "in stock", "verfügbar"
+        ]
+        
+        let isOutOfStock = unavailableKeywords.contains { htmlLowercase.contains($0) }
+        let hasStock = availableKeywords.contains { htmlLowercase.contains($0) }
+        
+        return hasStock && !isOutOfStock
+    }
+    
+    private func extractAmazonImageURL(from html: String) -> String? {
+        let imagePatterns = [
+            #"<img[^>]*id="[^"]*product[^"]*Image[^"]*"[^>]*src="([^"]+)""#,
+            #"<img[^>]*data-old-hires="([^"]+)""#,
+            #"<img[^>]*data-a-dynamic-image="[^"]*([^"]*\.jpg)"#,
+            #"<meta[^>]*property="og:image"[^>]*content="([^"]+)""#
+        ]
+        
+        for pattern in imagePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    if let urlRange = Range(match.range(at: 1), in: html) {
+                        let imageURL = String(html[urlRange])
+                        if imageURL.hasPrefix("http") {
+                            return imageURL
+                        } else if imageURL.hasPrefix("//") {
+                            return "https:" + imageURL
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    private func extractAmazonDescription(from html: String) -> String? {
+        let descPatterns = [
+            #"<div[^>]*id="[^"]*feature[^"]*bullets[^"]*"[^>]*>(.*?)</div>"#,
+            #"<div[^>]*class="[^"]*product[^"]*description[^"]*"[^>]*>(.*?)</div>"#
+        ]
+        
+        for pattern in descPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    if let descRange = Range(match.range(at: 1), in: html) {
+                        let description = String(html[descRange])
+                            .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        if !description.isEmpty {
+                            return description
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    private func extractAmazonBrand(from html: String) -> String? {
+        let brandPatterns = [
+            #"<a[^>]*id="[^"]*byline[^"]*"[^>]*>(.*?)</a>"#,
+            #"<span[^>]*class="[^"]*brand[^"]*"[^>]*>(.*?)</span>"#
+        ]
+        
+        for pattern in brandPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    if let brandRange = Range(match.range(at: 1), in: html) {
+                        let brand = String(html[brandRange])
+                            .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        if !brand.isEmpty {
+                            return brand
+                        }
+                    }
+                }
+            }
+        }
+        
+        return nil
     }
     
     // MARK: - Shopify变体处理
@@ -592,7 +929,7 @@ class ProductMonitor: ObservableObject {
     }
     
     // 提取商品图片URL
-    private func extractProductImage(from html: String) -> String? {
+    private func extractImageURL(from html: String) -> String? {
         // Pop Mart 图片选择器模式
         let imagePatterns = [
             #"<img[^>]*class="[^"]*product[^"]*"[^>]*src="([^"]+)""#,
@@ -698,28 +1035,6 @@ private func extractProductName(from html: String) -> String? {
             
             if !cleanedName.isEmpty {
                 return cleanedName
-            }
-        }
-    }
-    
-    return nil
-}
-
-// 提取商品图片URL
-private func extractImageURL(from html: String) -> String? {
-    let imagePatterns = [
-        #"<meta[^>]*property="og:image"[^>]*content="([^"]+)""#,
-        #"<img[^>]*class="[^"]*product[^"]*image[^"]*"[^>]*src="([^"]+)""#,
-        #"<img[^>]*src="([^"]+)"[^>]*class="[^"]*product[^"]*""#
-    ]
-    
-    for pattern in imagePatterns {
-        if let range = html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
-            let match = String(html[range])
-            if let contentRange = match.range(of: #"content="([^"]+)"|src="([^"]+)""#, options: [.regularExpression]) {
-                let url = String(match[contentRange])
-                    .replacingOccurrences(of: #"content="|src="|""#, with: "", options: [.regularExpression])
-                return url
             }
         }
     }
