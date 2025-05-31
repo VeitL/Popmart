@@ -469,7 +469,7 @@ class ProductMonitor: ObservableObject {
             htmlLowercase.contains(indicator.lowercased())
         }
         
-        let hasProductInfo = extractProductName(from: html) != nil
+        let hasProductInfo = extractProductName(from: html, baseURL: product.url) != nil
         let hasProductImages = html.lowercased().contains("img") && 
                              (html.lowercased().contains("product") || 
                               html.lowercased().contains("image"))
@@ -599,269 +599,6 @@ class ProductMonitor: ObservableObject {
         }
     }
     
-    private func parseProductStatus(from html: String, for product: Product, responseTime: TimeInterval, statusCode: Int) {
-        updateProductStats(product, incrementError: false)
-        
-        // 检查是否被反爬虫检测
-        if statusCode == 403 || statusCode == 429 || html.contains("Access Denied") || html.contains("Cloudflare") {
-            addLog(for: product, status: .antiBot, message: "检测到反爬虫机制 (HTTP \(statusCode))", responseTime: responseTime, httpStatusCode: statusCode)
-            return
-        }
-        
-        // 增强的缺货关键词检测 - 德语网站专用
-        let unavailableKeywords = [
-            // 英语关键词
-            "out of stock", "sold out", "temporarily unavailable",
-            "sorry, this item is currently out of stock", "currently unavailable",
-            "not available", "item not available", "no longer available",
-            "discontinued", "out-of-stock", "soldout",
-            
-            // 德语关键词
-            "ausverkauft", "nicht verfügbar", "vorübergehend nicht verfügbar",
-            "leider ausverkauft", "derzeit nicht verfügbar", "nicht auf lager",
-            "zur zeit nicht verfügbar", "vergriffen", "nicht lieferbar",
-            "momentan nicht verfügbar", "aktuell nicht verfügbar",
-            
-            // Popmart特定关键词
-            "coming soon", "bald verfügbar", "pre-order", "vorbestellung",
-            "notify me", "benachrichtigen", "email me when available"
-        ]
-        
-        // 增强的有货关键词检测
-        let availableKeywords = [
-            // 英语关键词
-            "add to cart", "buy now", "purchase", "available",
-            "in stock", "add to bag", "add to basket", "order now",
-            "get it now", "shop now", "quick buy", "instant buy",
-            
-            // 德语关键词
-            "in den warenkorb", "jetzt kaufen", "verfügbar", "kaufen",
-            "sofort kaufen", "in den korb", "bestellen", "jetzt bestellen",
-            "auf lager", "lieferbar", "sofort lieferbar", "verfügbarkeit",
-            
-            // Popmart特定关键词
-            "add to wishlist", "zur wunschliste", "quick view",
-            "select variant", "variante wählen"
-        ]
-        
-        // 价格存在指标（通常表示商品可购买）
-        let priceIndicators = [
-            "€", "EUR", "price", "preis", "cost", "kosten",
-            "sale", "discount", "rabatt", "angebot"
-        ]
-        
-        let htmlLowercase = html.lowercased()
-        
-        // 获取当前商品状态
-        guard let productIndex = products.firstIndex(where: { $0.id == product.id }) else { return }
-        var currentProduct = products[productIndex]
-        
-        // 对于单变体产品，更新第一个变体的状态
-        if let firstVariantIndex = currentProduct.variants.indices.first {
-            let wasAvailable = currentProduct.variants[firstVariantIndex].isAvailable
-            
-            // 更智能的库存检测逻辑
-            let hasUnavailableKeywords = unavailableKeywords.contains { keyword in
-                htmlLowercase.contains(keyword.lowercased())
-            }
-            
-            let hasAvailableKeywords = availableKeywords.contains { keyword in
-                htmlLowercase.contains(keyword.lowercased())
-            }
-            
-            let hasPriceIndicators = priceIndicators.contains { indicator in
-                htmlLowercase.contains(indicator.lowercased())
-            }
-            
-            // 检查是否有具体的产品信息（标题、描述等）
-            let hasProductInfo = extractProductName(from: html) != nil
-            
-            // 检查是否有图片（通常表示商品存在）
-            let hasProductImages = html.lowercased().contains("img") && 
-                                 (html.lowercased().contains("product") || 
-                                  html.lowercased().contains("image"))
-            
-            // 检查特殊商品类型
-            let (isSpecialType, specialTypeInfo) = analyzeSpecialProductTypes(html: html, url: product.url)
-            
-            // 综合判断逻辑：
-            // 1. 如果明确显示缺货关键词，则判定为缺货
-            // 2. 如果有购买按钮或价格信息，且没有缺货关键词，则判定为有货
-            // 3. 如果有产品信息和图片，且没有明确的缺货信息，则倾向于判定为有货
-            // 4. 特殊商品类型（如手机壳）有额外的检测逻辑
-            var newAvailabilityStatus: Bool
-            
-            if hasUnavailableKeywords {
-                // 明确的缺货指示
-                newAvailabilityStatus = false
-            } else if hasAvailableKeywords || hasPriceIndicators {
-                // 有购买按钮或价格信息
-                newAvailabilityStatus = true
-            } else if hasProductInfo && hasProductImages {
-                // 有产品信息和图片，但没有明确的可用性指示
-                // 在这种情况下，我们倾向于认为是可用的，除非明确说明不可用
-                newAvailabilityStatus = true
-            } else if isSpecialType {
-                // 特殊商品类型，如果能解析到特殊信息，通常表示页面正常
-                newAvailabilityStatus = true
-            } else {
-                // 无法确定状态，保持之前的状态
-                newAvailabilityStatus = currentProduct.variants[firstVariantIndex].isAvailable
-            }
-            
-            currentProduct.variants[firstVariantIndex].isAvailable = newAvailabilityStatus
-            
-            // 提取价格信息（增强版）
-            if let price = extractEnhancedPrice(from: html) {
-                currentProduct.variants[firstVariantIndex] = VariantDetail(
-                    variant: currentProduct.variants[firstVariantIndex].variant,
-                    name: currentProduct.variants[firstVariantIndex].name,
-                    price: price,
-                    isAvailable: currentProduct.variants[firstVariantIndex].isAvailable,
-                    url: currentProduct.variants[firstVariantIndex].url,
-                    imageURL: currentProduct.variants[firstVariantIndex].imageURL,
-                    sku: currentProduct.variants[firstVariantIndex].sku,
-                    stockLevel: currentProduct.variants[firstVariantIndex].stockLevel
-                )
-            }
-            
-            // 更新产品信息
-            products[productIndex] = currentProduct
-            saveProducts()
-            
-            // 记录详细日志
-            let statusMessage = currentProduct.variants[firstVariantIndex].isAvailable ? "有库存 ✅" : "缺货 ❌"
-            let priceInfo = currentProduct.variants[firstVariantIndex].price != nil ? " (价格: \(currentProduct.variants[firstVariantIndex].price!))" : ""
-            let specialTypeMsg = isSpecialType ? "\n特殊类型: \(specialTypeInfo ?? "已识别")" : ""
-            let detectionInfo = """
-            检测信息: 缺货词=\(hasUnavailableKeywords ? "是" : "否"), \
-            购买词=\(hasAvailableKeywords ? "是" : "否"), \
-            价格=\(hasPriceIndicators ? "是" : "否"), \
-            商品信息=\(hasProductInfo ? "是" : "否")\(specialTypeMsg)
-            """
-            
-            if wasAvailable != currentProduct.variants[firstVariantIndex].isAvailable {
-                let changeMessage = currentProduct.variants[firstVariantIndex].isAvailable ? "🎉 商品上架了！" : "⚠️ 商品已下架"
-                addLog(for: currentProduct, status: .availabilityChanged, 
-                      message: "\(changeMessage) - \(statusMessage)\(priceInfo)\n\(detectionInfo)", 
-                      responseTime: responseTime, httpStatusCode: statusCode)
-                
-                // 如果商品从缺货变为有货，发送通知
-                if !wasAvailable && currentProduct.variants[firstVariantIndex].isAvailable {
-                    NotificationCenter.default.post(
-                        name: NSNotification.Name("ProductAvailable"),
-                        object: currentProduct
-                    )
-                }
-            } else {
-                addLog(for: currentProduct, status: .success, 
-                      message: "状态检查: \(statusMessage)\(priceInfo)\n\(detectionInfo)", 
-                      responseTime: responseTime, httpStatusCode: statusCode)
-            }
-        }
-    }
-    
-    // 增强的价格提取方法
-    private func extractEnhancedPrice(from html: String) -> String? {
-        // 更全面的价格提取正则表达式
-        let pricePatterns = [
-            // 欧元符号在前
-            #"€\s*(\d+[.,]\d{1,2})"#,
-            #"EUR\s*(\d+[.,]\d{1,2})"#,
-            
-            // 欧元符号在后
-            #"(\d+[.,]\d{1,2})\s*€"#,
-            #"(\d+[.,]\d{1,2})\s*EUR"#,
-            
-            // JSON格式的价格
-            #""price":\s*"([^"]+)""#,
-            #""amount":\s*"([^"]+)""#,
-            #""value":\s*"?(\d+[.,]?\d*)"?"#,
-            
-            // HTML元素中的价格
-            #"<span[^>]*class="[^"]*price[^"]*"[^>]*>.*?€?\s*(\d+[.,]\d{1,2})"#,
-            #"<div[^>]*class="[^"]*price[^"]*"[^>]*>.*?€?\s*(\d+[.,]\d{1,2})"#,
-            #"<p[^>]*class="[^"]*price[^"]*"[^>]*>.*?€?\s*(\d+[.,]\d{1,2})"#,
-            
-            // data属性中的价格
-            #"data-price="(\d+[.,]?\d*)\""#,
-            #"data-amount="(\d+[.,]?\d*)\""#,
-            
-            // Schema.org微数据
-            #"itemprop="price"[^>]*content="([^"]+)""#,
-            #"itemprop="lowPrice"[^>]*content="([^"]+)""#,
-            
-            // 特殊格式
-            #"preis[:\s]*€?\s*(\d+[.,]\d{1,2})"#,
-            #"kosten[:\s]*€?\s*(\d+[.,]\d{1,2})"#
-        ]
-        
-        for pattern in pricePatterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-                let range = NSRange(location: 0, length: html.count)
-                if let match = regex.firstMatch(in: html, options: [], range: range) {
-                    if let priceRange = Range(match.range(at: 1), in: html) {
-                        let priceString = String(html[priceRange])
-                            .replacingOccurrences(of: ",", with: ".")
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        
-                        // 验证价格格式
-                        if let _ = Double(priceString), !priceString.isEmpty {
-                            return "€\(priceString)"
-                        }
-                    }
-                }
-            }
-        }
-        
-        return nil
-    }
-    
-    // 提取价格的辅助函数
-    private func extractPrice(from html: String) -> String? {
-        // 提取价格的正则表达式模式
-        let pricePatterns = [
-            #"€\s*(\d+[,.]?\d*)"#,
-            #"(\d+[,.]?\d*)\s*€"#,
-            #""price":\s*"([^"]+)""#,
-            #"<span[^>]*class="[^"]*price[^"]*"[^>]*>([^<]*)</span>"#
-        ]
-        
-        for pattern in pricePatterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
-                let range = NSRange(location: 0, length: html.count)
-                if let match = regex.firstMatch(in: html, options: [], range: range) {
-                    if let priceRange = Range(match.range(at: 1), in: html) {
-                        let priceString = String(html[priceRange])
-                        // 清理价格字符串
-                        let cleanedPrice = priceString.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !cleanedPrice.isEmpty {
-                            return "€\(cleanedPrice)"
-                        }
-                    }
-                }
-            }
-        }
-        
-        return nil
-    }
-    
-    // 移除旧的extractPrice方法
-    private func updateProductStats(_ product: Product, incrementError: Bool) {
-        if let index = products.firstIndex(where: { $0.id == product.id }) {
-            // 更新第一个变体的统计信息
-            if let firstVariantIndex = products[index].variants.indices.first {
-                products[index].variants[firstVariantIndex].incrementCheck()
-                if incrementError {
-                    products[index].variants[firstVariantIndex].incrementError()
-                } else {
-                    products[index].variants[firstVariantIndex].incrementSuccess()
-                }
-            }
-            saveProducts()
-        }
-    }
-    
     // MARK: - 日志管理
     private func addLog(for product: Product, status: LogStatus, message: String, responseTime: TimeInterval? = nil, httpStatusCode: Int? = nil) {
         let log = MonitorLog(
@@ -959,9 +696,10 @@ class ProductMonitor: ObservableObject {
         }.resume()
     }
     
-    // 从HTML中提取商品信息
+    // 从HTML中提取商品信息 - 增强版
     private func extractProductPageInfo(from html: String, baseURL: String) -> ProductPageInfo? {
         print("🔍 [商品解析] 开始解析商品页面: \(baseURL)")
+        print("📄 [商品解析] HTML内容长度: \(html.count) 字符")
         
         // 首先尝试Amazon解析
         if baseURL.contains("amazon") {
@@ -971,26 +709,119 @@ class ProductMonitor: ObservableObject {
         
         print("🏪 [商品解析] 使用通用解析器")
         
-        // 然后尝试Popmart解析
-        guard let name = extractProductName(from: html) else {
+        // 尝试提取商品名称
+        guard let name = extractProductName(from: html, baseURL: baseURL) else {
             print("❌ [商品解析] 无法提取商品名称")
+            // 添加调试信息
+            print("🔍 [调试] HTML前500字符:")
+            let preview = String(html.prefix(500))
+            print(preview)
+            
+            // 尝试备选解析方法
+            if let fallbackName = extractFallbackProductName(from: html, url: baseURL) {
+                print("🔄 [商品解析] 使用备选方法提取到名称: \(fallbackName)")
+                return createProductInfoWithName(fallbackName, html: html, baseURL: baseURL)
+            }
+            
             return nil
         }
         
         print("📝 [商品解析] 商品名称: \(name)")
         
+        return createProductInfoWithName(name, html: html, baseURL: baseURL)
+    }
+    
+    // 创建产品信息
+    private func createProductInfoWithName(_ name: String, html: String, baseURL: String) -> ProductPageInfo {
         // 基本信息
+        let variants = extractShopifyVariants(from: html, baseURL: baseURL)
+        let imageURL = extractImageURL(from: html)
+        let description = extractProductDescription(from: html)
+        let brand = extractProductBrand(from: html)
+        
+        print("🔧 [商品解析] 提取到 \(variants.count) 个变体")
+        if let imageURL = imageURL {
+            print("🖼️ [商品解析] 商品图片: \(imageURL)")
+        }
+        if let description = description {
+            print("📄 [商品解析] 商品描述长度: \(description.count) 字符")
+        }
+        if let brand = brand {
+            print("🏷️ [商品解析] 品牌: \(brand)")
+        }
+        
         let info = ProductPageInfo(
             name: name,
-            availableVariants: extractShopifyVariants(from: html, baseURL: baseURL),
-            imageURL: extractImageURL(from: html),
-            description: nil,
-            brand: nil,
+            availableVariants: variants,
+            imageURL: imageURL,
+            description: description,
+            brand: brand,
             category: nil
         )
         
         print("✅ [商品解析] 通用解析完成")
         return info
+    }
+    
+    // 备选商品名称提取方法
+    private func extractFallbackProductName(from html: String, url: String) -> String? {
+        print("🔄 [备选解析] 开始备选商品名称提取...")
+        
+        // 方法1: 从URL中提取商品名称
+        if let urlName = extractNameFromURL(url) {
+            print("✅ [备选解析] 从URL提取到名称: \(urlName)")
+            return urlName
+        }
+        
+        // 方法2: 查找任何h1-h6标签
+        let headerPatterns = [
+            #"<h[1-6][^>]*>(.*?)</h[1-6]>"#,
+            #"<p[^>]*class="[^"]*title[^"]*"[^>]*>(.*?)</p>"#,
+            #"<div[^>]*class="[^"]*name[^"]*"[^>]*>(.*?)</div>"#
+        ]
+        
+        for pattern in headerPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                let matches = regex.matches(in: html, options: [], range: range)
+                
+                for match in matches {
+                    if let nameRange = Range(match.range(at: 1), in: html) {
+                        let name = String(html[nameRange])
+                            .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        if isValidProductName(name) {
+                            print("✅ [备选解析] 从标题标签提取到名称: \(name)")
+                            return name
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 方法3: 使用页面标题作为最后手段
+        if let titleMatch = html.range(of: #"<title>(.*?)</title>"#, options: [.regularExpression, .caseInsensitive]) {
+            let title = String(html[titleMatch])
+                .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            // 清理常见的网站后缀
+            let cleanTitle = title
+                .replacingOccurrences(of: " - Popmart", with: "")
+                .replacingOccurrences(of: " | Popmart", with: "")
+                .replacingOccurrences(of: " - Amazon", with: "")
+                .replacingOccurrences(of: " | Amazon", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if isValidProductName(cleanTitle) {
+                print("✅ [备选解析] 从页面标题提取到名称: \(cleanTitle)")
+                return cleanTitle
+            }
+        }
+        
+        print("❌ [备选解析] 所有备选方法都失败了")
+        return nil
     }
     
     // MARK: - Amazon商品解析
@@ -1511,12 +1342,14 @@ class ProductMonitor: ObservableObject {
         return nil
     }
     
-    // MARK: - Shopify变体处理
+    // MARK: - Shopify变体处理 - 增强版
     private func extractShopifyVariants(from html: String, baseURL: String) -> [ProductPageInfo.ProductVariantInfo] {
+        print("🔧 [变体解析] 开始提取变体信息...")
         var variants: [ProductPageInfo.ProductVariantInfo] = []
         
-        // 提取Shopify产品配置
+        // 方法1: 提取Shopify产品配置
         if let shopifyConfig = extractShopifyProductConfig(from: html) {
+            print("✅ [变体解析] 找到Shopify配置")
             if let variations = shopifyConfig["variants"] as? [[String: Any]] {
                 for variation in variations {
                     // 安全地访问字典值
@@ -1550,13 +1383,157 @@ class ProductMonitor: ObservableObject {
             }
         }
         
+        // 方法2: 通用变体选择器检测
+        if variants.isEmpty {
+            print("🔄 [变体解析] Shopify配置为空，尝试通用选择器...")
+            variants = extractGenericVariants(from: html, baseURL: baseURL)
+        }
+        
+        // 方法3: HTML表单选择器
+        if variants.isEmpty {
+            print("🔄 [变体解析] 通用选择器为空，尝试表单选择器...")
+            variants = extractFormVariants(from: html, baseURL: baseURL)
+        }
+        
+        // 方法4: 如果没有找到任何变体，创建默认变体
+        if variants.isEmpty {
+            print("🔄 [变体解析] 未找到变体，创建默认变体...")
+            variants = createDefaultVariant(baseURL: baseURL, html: html)
+        }
+        
+        print("📦 [变体解析] 最终提取到 \(variants.count) 个变体")
         return variants
     }
     
-    // 从Shopify网站提取变体信息
+    // 从HTML中提取通用变体信息
+    private func extractGenericVariants(from html: String, baseURL: String) -> [ProductPageInfo.ProductVariantInfo] {
+        let variants: [ProductPageInfo.ProductVariantInfo] = []
+        
+        // 检测变体选择器的模式
+        let variantPatterns = [
+            // JSON数据中的变体
+            #""variants":\s*\[(.*?)\]"#,
+            // 选择器中的选项
+            #"<select[^>]*name="[^"]*variant[^"]*"[^>]*>(.*?)</select>"#,
+            #"<select[^>]*class="[^"]*variant[^"]*"[^>]*>(.*?)</select>"#,
+            // 按钮式变体选择器
+            #"<div[^>]*class="[^"]*variant[^"]*selector[^"]*"[^>]*>(.*?)</div>"#,
+            // Radio按钮组
+            #"<input[^>]*type="radio"[^>]*name="[^"]*variant[^"]*"[^>]*>"#
+        ]
+        
+        for pattern in variantPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                if regex.firstMatch(in: html, options: [], range: range) != nil {
+                    print("✅ [变体解析] 匹配到变体模式")
+                    // 这里可以进一步解析匹配到的内容
+                    break
+                }
+            }
+        }
+        
+        return variants
+    }
+    
+    // 从表单元素中提取变体
+    private func extractFormVariants(from html: String, baseURL: String) -> [ProductPageInfo.ProductVariantInfo] {
+        var variants: [ProductPageInfo.ProductVariantInfo] = []
+        
+        // 查找option标签
+        let optionPattern = #"<option[^>]*value="([^"]*)"[^>]*>(.*?)</option>"#
+        
+        if let regex = try? NSRegularExpression(pattern: optionPattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+            let range = NSRange(location: 0, length: html.count)
+            let matches = regex.matches(in: html, options: [], range: range)
+            
+            for match in matches {
+                if let valueRange = Range(match.range(at: 1), in: html),
+                   let textRange = Range(match.range(at: 2), in: html) {
+                    
+                    let value = String(html[valueRange])
+                    let text = String(html[textRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    // 跳过空值或默认选项
+                    if !value.isEmpty && !text.isEmpty && 
+                       !text.lowercased().contains("select") && 
+                       !text.lowercased().contains("choose") {
+                        
+                        let variant = determineVariantType(from: text)
+                        let variantInfo = ProductPageInfo.ProductVariantInfo(
+                            variant: variant,
+                            price: nil,
+                            isAvailable: true,
+                            url: constructVariantURL(baseURL: baseURL, sku: value),
+                            imageURL: nil,
+                            sku: value,
+                            stockLevel: nil,
+                            variantName: text
+                        )
+                        
+                        variants.append(variantInfo)
+                    }
+                }
+            }
+        }
+        
+        return variants
+    }
+    
+    // 创建默认变体
+    private func createDefaultVariant(baseURL: String, html: String) -> [ProductPageInfo.ProductVariantInfo] {
+        let isAvailable = checkAvailability(from: html)
+        let price = extractEnhancedPrice(from: html)
+        
+        let defaultVariant = ProductPageInfo.ProductVariantInfo(
+            variant: .singleBox,
+            price: price,
+            isAvailable: isAvailable,
+            url: baseURL,
+            imageURL: extractImageURL(from: html),
+            sku: nil,
+            stockLevel: nil,
+            variantName: "默认选项"
+        )
+        
+        print("📦 [变体解析] 创建默认变体: \(defaultVariant.variantName ?? "未知")")
+        return [defaultVariant]
+    }
+    
+    // 从Shopify网站提取变体信息 - 增强版
     private func extractShopifyProductConfig(from html: String) -> [String: Any]? {
-        // 实现从HTML中提取Shopify产品配置的逻辑
-        // 这里需要根据实际情况实现
+        // 查找Shopify产品数据的各种模式
+        let shopifyPatterns = [
+            // 标准Shopify产品配置
+            #"window\.ShopifyAnalytics\.meta\.product\s*=\s*(\{.*?\});"#,
+            #"window\.ShopifyAnalytics\.meta\s*=\s*\{.*?product:\s*(\{.*?\})"#,
+            // 产品JSON数据
+            #"product:\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})"#,
+            // 变体数组
+            #""variants":\s*(\[.*?\])"#,
+            // 直接的product对象
+            #"var\s+product\s*=\s*(\{.*?\});"#
+        ]
+        
+        for pattern in shopifyPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    if let jsonRange = Range(match.range(at: 1), in: html) {
+                        let jsonString = String(html[jsonRange])
+                        
+                        // 尝试解析JSON
+                        if let jsonData = jsonString.data(using: .utf8),
+                           let productConfig = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                            print("✅ [变体解析] 成功解析Shopify配置")
+                            return productConfig
+                        }
+                    }
+                }
+            }
+        }
+        
+        print("❌ [变体解析] 未找到Shopify配置")
         return nil
     }
     
@@ -1806,6 +1783,1071 @@ class ProductMonitor: ObservableObject {
         
         return request
     }
+    
+    // MARK: - 更新产品统计信息
+    private func updateProductStats(_ product: Product, incrementError: Bool) {
+        if let index = products.firstIndex(where: { $0.id == product.id }) {
+            // 更新第一个变体的统计信息
+            if let firstVariantIndex = products[index].variants.indices.first {
+                products[index].variants[firstVariantIndex].incrementCheck()
+                if incrementError {
+                    products[index].variants[firstVariantIndex].incrementError()
+                } else {
+                    products[index].variants[firstVariantIndex].incrementSuccess()
+                }
+            }
+            saveProducts()
+        }
+    }
+    
+    // MARK: - 解析产品状态（增强版本）
+    private func parseProductStatus(from html: String, for product: Product, responseTime: TimeInterval, statusCode: Int) {
+        updateProductStats(product, incrementError: false)
+        
+        // 检查是否被反爬虫检测
+        if statusCode == 403 || statusCode == 429 || html.contains("Access Denied") || html.contains("Cloudflare") {
+            addLog(for: product, status: .antiBot, message: "检测到反爬虫机制 (HTTP \(statusCode))", responseTime: responseTime, httpStatusCode: statusCode)
+            return
+        }
+        
+        guard let productIndex = products.firstIndex(where: { $0.id == product.id }) else { return }
+        var currentProduct = products[productIndex]
+        
+        // 增强的商品信息解析
+        let extractedName = extractProductName(from: html, baseURL: product.url)
+        let extractedPrice = extractEnhancedPrice(from: html)
+        let isAvailable = determineEnhancedAvailability(from: html)
+        let imageURL = extractEnhancedImage(from: html, baseURL: product.url)
+        
+        // 记录调试信息
+        if product.enableDebugLogging {
+            var debugInfo: [String] = []
+            debugInfo.append("解析结果:")
+            debugInfo.append("- 商品名称: \(extractedName ?? "未找到")")
+            debugInfo.append("- 价格: \(extractedPrice ?? "未找到")")
+            debugInfo.append("- 可用性: \(isAvailable)")
+            debugInfo.append("- 图片URL: \(imageURL ?? "未找到")")
+            addLog(for: product, status: .success, message: debugInfo.joined(separator: "\n"))
+        }
+        
+        // 更新产品信息
+        if let name = extractedName, !name.isEmpty && name != currentProduct.name {
+            currentProduct.name = name
+        }
+        
+        // 更新第一个变体的信息
+        if !currentProduct.variants.isEmpty {
+            var firstVariant = currentProduct.variants[0]
+            let previouslyAvailable = firstVariant.isAvailable
+            
+            if let price = extractedPrice {
+                firstVariant.price = price
+            }
+            
+            firstVariant.isAvailable = isAvailable
+            firstVariant.lastChecked = Date()
+            
+            // 检查可用性变化
+            if previouslyAvailable != isAvailable {
+                let statusMessage = isAvailable ? "商品现在有货了！🎉" : "商品已缺货 😞"
+                addLog(for: currentProduct, status: .availabilityChanged, message: "[\(firstVariant.name)] \(statusMessage)", responseTime: responseTime)
+                
+                // 添加到可用性历史
+                let change = AvailabilityChange(
+                    variantId: firstVariant.id,
+                    variantName: firstVariant.name,
+                    wasAvailable: previouslyAvailable,
+                    isAvailable: isAvailable,
+                    price: extractedPrice
+                )
+                currentProduct.availabilityHistory.append(change)
+            } else {
+                addLog(for: currentProduct, status: .success, message: "[\(firstVariant.name)] 检查完成 - 状态: \(isAvailable ? "有货" : "缺货")", responseTime: responseTime)
+            }
+            
+            currentProduct.variants[0] = firstVariant
+        }
+        
+        products[productIndex] = currentProduct
+        saveProducts()
+    }
+    
+    // MARK: - 增强的解析方法
+    
+    // 提取商品名称 - 优先主标题
+    private func extractProductName(from html: String, baseURL: String) -> String? {
+        // 优先匹配商品详情主标题
+        let namePatterns = [
+            #"<h1[^>]*>([^<]+)</h1>"#, // 最高优先级：主标题
+            #"<h1[^>]*class=\"[^\"]*product[^\"]*title[^\"]*\"[^>]*>(.*?)</h1>"#,
+            #"<h1[^>]*class=\"[^\"]*title[^\"]*\"[^>]*>(.*?)</h1>"#,
+            #"<div[^>]*class=\"[^\"]*product[^\"]*name[^\"]*\"[^>]*>(.*?)</div>"#,
+            #"<span[^>]*class=\"[^\"]*product[^\"]*title[^\"]*\"[^>]*>(.*?)</span>"#,
+            // JSON-LD 结构化数据
+            #""name"\s*:\s*"([^"]+)""#,
+            #""@type"\s*:\s*"Product".*?"name"\s*:\s*"([^"]+)""#,
+            // Open Graph 元标签
+            #"<meta[^>]*property=\"og:title\"[^>]*content=\"([^"]+)\""#,
+            #"<meta[^>]*name=\"twitter:title\"[^>]*content=\"([^"]+)\""#,
+            // 标准HTML标签
+            #"<h2[^>]*class=\"[^\"]*product[^\"]*\"[^>]*>(.*?)</h2>"#,
+            // 通用元标签
+            #"<meta[^>]*name=\"title\"[^>]*content=\"([^"]+)\""#,
+            #"<meta[^>]*property=\"title\"[^>]*content=\"([^"]+)\""#,
+            // 页面标题（最后备选）
+            #"<title>(.*?)</title>"#
+        ]
+        print("🔍 [商品解析] 开始提取商品名称，使用 \(namePatterns.count) 种模式...")
+        for (index, pattern) in namePatterns.enumerated() {
+            do {
+                let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+                let range = NSRange(location: 0, length: html.count)
+                if let match = regex.firstMatch(in: html, options: [], range: range) {
+                    let captureRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
+                    if let nameRange = Range(captureRange, in: html) {
+                        var cleanedName = String(html[nameRange])
+                        cleanedName = cleanedName
+                            .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                            .replacingOccurrences(of: "&amp;", with: "&")
+                            .replacingOccurrences(of: "&quot;", with: "\"")
+                            .replacingOccurrences(of: "&lt;", with: "<")
+                            .replacingOccurrences(of: "&gt;", with: ">")
+                            .replacingOccurrences(of: "&#39;", with: "'")
+                            .replacingOccurrences(of: "&nbsp;", with: " ")
+                            .replacingOccurrences(of: "\n", with: " ")
+                            .replacingOccurrences(of: "\t", with: " ")
+                            .replacingOccurrences(of: #"\s+"#, with: " ", options: [.regularExpression])
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        if isValidProductName(cleanedName) {
+                            print("✅ [商品解析] 使用模式 \(index + 1) 成功提取商品名称: \(cleanedName)")
+                            return cleanedName
+                        } else {
+                            print("⚠️ [商品解析] 模式 \(index + 1) 匹配但名称无效: \(cleanedName)")
+                        }
+                    }
+                }
+            } catch {
+                print("❌ [商品解析] 正则表达式模式 \(index + 1) 编译失败: \(error)")
+                continue
+            }
+        }
+        print("❌ [商品解析] 所有模式都无法提取有效的商品名称")
+        if let urlBasedName = extractNameFromURL(baseURL) {
+            print("🔄 [商品解析] 从URL中提取备选名称: \(urlBasedName)")
+            return urlBasedName
+        }
+        return nil
+    }
+
+    // 增强价格提取 - 针对Popmart网站优化
+    private func extractEnhancedPrice(from html: String) -> String? {
+        print("💰 [价格提取] 开始提取价格信息...")
+        print("📄 [价格提取] HTML片段预览: \(String(html.prefix(500)).replacingOccurrences(of: "\n", with: " "))")
+        
+        // 提取HTML中包含价格相关信息的行
+        let priceRelatedLines = html.components(separatedBy: .newlines).filter { line in
+            let lowercaseLine = line.lowercased()
+            return lowercaseLine.contains("€") || 
+                   lowercaseLine.contains("eur") || 
+                   lowercaseLine.contains("price") || 
+                   lowercaseLine.contains("preis") ||
+                   lowercaseLine.contains("cost") ||
+                   lowercaseLine.contains("amount")
+        }
+        
+        print("💰 [价格提取] 找到 \(priceRelatedLines.count) 行包含价格相关信息")
+        for (index, line) in priceRelatedLines.prefix(5).enumerated() {
+            print("💰 [价格行 \(index + 1)] \(line.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        
+        // Popmart网站专用价格模式 - 扩展版
+        let popmartPricePatterns = [
+            // 标准价格显示模式
+            #"<span[^>]*class=\"[^\"]*price[^\"]*\"[^>]*>\s*€\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"<div[^>]*class=\"[^\"]*price[^\"]*\"[^>]*>\s*€\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"<span[^>]*class=\"[^\"]*product-price[^\"]*\"[^>]*>\s*€\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"<span[^>]*class=\"[^\"]*current-price[^\"]*\"[^>]*>\s*€\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"<span[^>]*class=\"[^\"]*selling-price[^\"]*\"[^>]*>\s*€\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"<span[^>]*class=\"[^\"]*final-price[^\"]*\"[^>]*>\s*€\s*([0-9]+[.,][0-9]{1,2})"#,
+            
+            // HTML属性中的价格
+            #"data-price=\"([0-9]+[.,][0-9]{1,2})\""#,
+            #"data-value=\"([0-9]+[.,][0-9]{1,2})\""#,
+            #"data-amount=\"([0-9]+[.,][0-9]{1,2})\""#,
+            
+            // JSON数据中的价格（多种变体）
+            #"\"price\":\s*\"?€?\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"\"amount\":\s*\"?([0-9]+[.,][0-9]{1,2})"#,
+            #"\"value\":\s*\"?([0-9]+[.,][0-9]{1,2})"#,
+            #"\"cost\":\s*\"?([0-9]+[.,][0-9]{1,2})"#,
+            #"\"retail_price\":\s*\"?([0-9]+[.,][0-9]{1,2})"#,
+            #"\"selling_price\":\s*\"?([0-9]+[.,][0-9]{1,2})"#,
+            
+            // 内联样式和文本中的价格
+            #"€\s*([0-9]+[.,][0-9]{1,2})\s*(?:EUR|€|</|\s|$)"#,
+            #"([0-9]+[.,][0-9]{1,2})\s*€"#,
+            #"EUR\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"([0-9]+[.,][0-9]{1,2})\s*EUR"#,
+            
+            // 特殊格式
+            #"price[^>]*>.*?€\s*([0-9]+[.,][0-9]{1,2})"#,
+            #"preis[^>]*>.*?€\s*([0-9]+[.,][0-9]{1,2})"#,
+            
+            // 更宽松的匹配（可能有额外的空格或标签）
+            #"<[^>]*price[^>]*>.*?([0-9]+[.,][0-9]{1,2})"#,
+            #">.*?€.*?([0-9]+[.,][0-9]{1,2})"#,
+            #">.*?([0-9]+[.,][0-9]{1,2}).*?€"#
+        ]
+        
+        for (index, pattern) in popmartPricePatterns.enumerated() {
+            print("💰 [价格提取] 尝试模式 \(index + 1): \(pattern)")
+            if let priceString = extractFirstMatch(pattern: pattern, from: html) {
+                print("💰 [价格提取] 模式 \(index + 1) 匹配到原始价格: '\(priceString)'")
+                let normalizedPrice = priceString.replacingOccurrences(of: ",", with: ".")
+                if let priceValue = Double(normalizedPrice) {
+                    let formattedPrice = "€\(normalizedPrice)"
+                    print("✅ [价格提取] 使用模式 \(index + 1) 成功提取价格: \(formattedPrice) (数值: \(priceValue))")
+                    return formattedPrice
+                } else {
+                    print("⚠️ [价格提取] 模式 \(index + 1) 匹配但无法转换为数字: '\(priceString)' -> '\(normalizedPrice)'")
+                }
+            } else {
+                print("💰 [价格提取] 模式 \(index + 1) 无匹配")
+            }
+        }
+        
+        // 如果专用模式都不匹配，尝试更通用的模式
+        print("💰 [价格提取] 专用模式未找到价格，尝试通用模式...")
+        let generalPricePatterns = [
+            #"([0-9]{1,3}[.,][0-9]{2})\s*€"#,
+            #"€\s*([0-9]{1,3}[.,][0-9]{2})"#,
+            #"([0-9]{1,3}[.,][0-9]{1,2})\s*EUR"#,
+            #"EUR\s*([0-9]{1,3}[.,][0-9]{1,2})"#,
+            #"([0-9]{1,3}[.,][0-9]{2})"#  // 纯数字模式（最后尝试）
+        ]
+        
+        for (index, pattern) in generalPricePatterns.enumerated() {
+            print("💰 [价格提取] 尝试通用模式 \(index + 1): \(pattern)")
+            if let priceString = extractFirstMatch(pattern: pattern, from: html) {
+                print("💰 [价格提取] 通用模式 \(index + 1) 匹配到: '\(priceString)'")
+                let normalizedPrice = priceString.replacingOccurrences(of: ",", with: ".")
+                if let priceValue = Double(normalizedPrice), priceValue > 0 && priceValue < 10000 { // 合理的价格范围
+                    let formattedPrice = "€\(normalizedPrice)"
+                    print("✅ [价格提取] 使用通用模式 \(index + 1) 提取到价格: \(formattedPrice)")
+                    return formattedPrice
+                } else {
+                    print("⚠️ [价格提取] 通用模式 \(index + 1) 价格超出合理范围: '\(priceString)' -> \(normalizedPrice)")
+                }
+            }
+        }
+        
+        print("❌ [价格提取] 所有模式都未能提取到价格信息")
+        return nil
+    }
+
+    // 增强可用性判断 - 针对Popmart网站优化
+    private func determineEnhancedAvailability(from html: String) -> Bool {
+        print("🔍 [库存检测] 开始检测商品库存状态...")
+        
+        // Popmart网站专用检测逻辑
+        if let stockStatus = checkPopmartSpecificStock(from: html) {
+            print("✅ [库存检测] 使用Popmart专用检测: \(stockStatus ? "有货" : "缺货")")
+            return stockStatus
+        }
+        
+        // 通用缺货指示器
+        let unavailableIndicators = [
+            "ausverkauft", "nicht verfügbar", "out of stock", "sold out",
+            "nicht auf lager", "vergriffen", "nicht lieferbar",
+            "add-to-cart.*disabled", "btn.*disabled", "button.*disabled",
+            "not-available", "out-of-stock", "sold-out",
+            "缺货", "售完", "无库存", "已售完"
+        ]
+        
+        for indicator in unavailableIndicators {
+            let regex = try? NSRegularExpression(pattern: indicator, options: [.caseInsensitive])
+            if regex?.firstMatch(in: html, options: [], range: NSRange(location: 0, length: html.count)) != nil {
+                print("❌ [库存检测] 发现缺货指示器: \(indicator)")
+                return false
+            }
+        }
+        
+        // 通用有货指示器
+        let availableIndicators = [
+            "add to cart", "buy now", "in stock", "verfügbar", "auf lager",
+            "in den warenkorb", "jetzt kaufen", "zum warenkorb hinzufügen",
+            "加入购物车", "立即购买", "现货", "有库存"
+        ]
+        
+        for indicator in availableIndicators {
+            let regex = try? NSRegularExpression(pattern: indicator, options: [.caseInsensitive])
+            if regex?.firstMatch(in: html, options: [], range: NSRange(location: 0, length: html.count)) != nil {
+                print("✅ [库存检测] 发现有货指示器: \(indicator)")
+                return true
+            }
+        }
+        
+        // 检查按钮状态
+        if html.contains("add-to-cart") && !html.contains("disabled") {
+            print("✅ [库存检测] 发现可用的添加到购物车按钮")
+            return true
+        }
+        
+        // 如果找不到明确指示器，检查是否有价格且有add to cart（单变体商品）
+        if extractEnhancedPrice(from: html) != nil && html.lowercased().contains("add to cart") {
+            print("✅ [库存检测] 检测到价格和购买按钮，判断为有货")
+            return true
+        }
+        
+        print("❓ [库存检测] 无法确定库存状态，默认假设无货")
+        return false
+    }
+    
+    // MARK: - Popmart网站专用库存检测 - 改进版
+    private func checkPopmartSpecificStock(from html: String) -> Bool? {
+        print("🏪 [Popmart检测] 开始Popmart专用库存检测...")
+        print("📄 [Popmart检测] HTML长度: \(html.count) 字符")
+        
+        // 先检查是否确实是Popmart网站
+        if !html.lowercased().contains("popmart") {
+            print("❓ [Popmart检测] 不是Popmart网站，跳过专用检测")
+            return nil
+        }
+        
+        // 方法1: 检测明确的缺货状态
+        let outOfStockIndicators = [
+            "ausverkauft",
+            "sold out", 
+            "nicht verfügbar",
+            "nicht auf lager",
+            "vergriffen",
+            "out of stock"
+        ]
+        
+        for indicator in outOfStockIndicators {
+            if html.lowercased().contains(indicator) {
+                print("❌ [Popmart检测] 发现缺货指示词: \(indicator)")
+                return false
+            }
+        }
+        
+        // 方法2: 检测disabled按钮
+        let disabledButtonPatterns = [
+            #"<button[^>]*disabled[^>]*>"#,
+            #"<button[^>]*class=\"[^\"]*disabled[^\"]*\""#,
+            #"<button[^>]*class=\"[^\"]*btn[^\"]*disabled[^\"]*\""#
+        ]
+        
+        for pattern in disabledButtonPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let range = NSRange(location: 0, length: html.count)
+                if regex.firstMatch(in: html, options: [], range: range) != nil {
+                    print("❌ [Popmart检测] 发现disabled按钮")
+                    return false
+                }
+            }
+        }
+        
+        // 方法3: 检测有货按钮和文本
+        let inStockIndicators = [
+            "in den warenkorb",
+            "add to cart",
+            "zum warenkorb hinzufügen",
+            "jetzt kaufen",
+            "buy now",
+            "in den warenkorb legen"
+        ]
+        
+        var foundAddToCartButton = false
+        for indicator in inStockIndicators {
+            if html.lowercased().contains(indicator) {
+                print("✅ [Popmart检测] 发现有货指示词: \(indicator)")
+                foundAddToCartButton = true
+                break
+            }
+        }
+        
+        // 方法4: 检测按钮状态
+        let activeButtonPatterns = [
+            #"<button[^>]*class=\"[^\"]*btn[^\"]*primary[^\"]*\"[^>]*>.*?(warenkorb|cart)"#,
+            #"<button[^>]*class=\"[^\"]*btn[^\"]*add[^\"]*\"[^>]*>"#,
+            #"<button[^>]*class=\"[^\"]*add[^\"]*to[^\"]*cart[^\"]*\"[^>]*>"#,
+            #"<button[^>]*id=\"[^\"]*add[^\"]*cart[^\"]*\"[^>]*>"#
+        ]
+        
+        var foundActiveButton = false
+        for pattern in activeButtonPatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                let range = NSRange(location: 0, length: html.count)
+                if regex.firstMatch(in: html, options: [], range: range) != nil {
+                    print("✅ [Popmart检测] 发现有效的购买按钮")
+                    foundActiveButton = true
+                    break
+                }
+            }
+        }
+        
+        // 方法5: 检查价格信息
+        let hasPrice = extractEnhancedPrice(from: html) != nil
+        print("💰 [Popmart检测] 是否有价格信息: \(hasPrice)")
+        
+        // 综合判断
+        if foundAddToCartButton || foundActiveButton {
+            if hasPrice {
+                print("✅ [Popmart检测] 综合判断: 有货 (有购买按钮且有价格)")
+                return true
+            } else {
+                print("⚠️ [Popmart检测] 有购买按钮但无价格信息，判断为有货")
+                return true
+            }
+        }
+        
+        // 如果没有找到明确的有货指示器，但有价格，可能是有货的
+        if hasPrice {
+            print("⚠️ [Popmart检测] 有价格但无明确购买按钮，需要进一步检查")
+            
+            // 检查是否有表单提交相关的元素
+            if html.contains("form") && (html.contains("submit") || html.contains("button")) {
+                print("✅ [Popmart检测] 发现表单和按钮，判断为有货")
+                return true
+            }
+        }
+        
+        print("❓ [Popmart检测] 无法确定库存状态，返回nil让通用检测接管")
+        return nil
+    }
+    
+    // MARK: - JavaScript注入式库存检测（备用方案）
+    private func generateStockCheckJavaScript() -> String {
+        return """
+        (function() {
+            // 检查有货按钮
+            let inStockButton = document.querySelector('button.btn.btn--primary');
+            let hasAddToCart = inStockButton && 
+                              (inStockButton.innerText.includes('In den Warenkorb') || 
+                               inStockButton.innerText.includes('Add to Cart') ||
+                               inStockButton.innerText.includes('zum Warenkorb'));
+            
+            // 检查缺货状态
+            let soldOutButton = document.querySelector('button.btn.disabled');
+            let soldOutStatus = document.querySelector('.product-action__status');
+            let isSoldOut = (soldOutButton && soldOutButton.innerText.includes('Ausverkauft')) ||
+                           (soldOutStatus && soldOutStatus.innerText.includes('Ausverkauft')) ||
+                           (soldOutStatus && soldOutStatus.innerText.includes('Sold Out'));
+            
+            return {
+                inStock: hasAddToCart && !isSoldOut,
+                soldOut: isSoldOut,
+                buttonText: inStockButton ? inStockButton.innerText : '',
+                statusText: soldOutStatus ? soldOutStatus.innerText : ''
+            };
+        })();
+        """
+    }
+    
+    // MARK: - 调试和测试方法
+    
+    // 测试特定URL的解析能力
+    func testURL(_ urlString: String, completion: @escaping (String) -> Void) {
+        var resultLog = ""
+        
+        resultLog += "🔍 [URL测试] 开始测试URL: \(urlString)\n"
+        resultLog += "⏰ [URL测试] 时间: \(Date())\n\n"
+        
+        guard let url = URL(string: urlString) else {
+            resultLog += "❌ [URL测试] 无效的URL格式\n"
+            completion(resultLog)
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        // 设置完整的浏览器请求头
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("de-DE,de;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
+        request.setValue("1", forHTTPHeaderField: "Upgrade-Insecure-Requests")
+        request.setValue("navigate", forHTTPHeaderField: "Sec-Fetch-Mode")
+        request.setValue("document", forHTTPHeaderField: "Sec-Fetch-Dest")
+        request.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
+        request.setValue("https://www.popmart.com", forHTTPHeaderField: "Referer")
+        request.timeoutInterval = 30.0
+        
+        resultLog += "📤 [请求详情] 设置完整的浏览器请求头\n"
+        resultLog += "🌐 [请求详情] User-Agent: Chrome/120 (macOS)\n"
+        resultLog += "🇩🇪 [请求详情] Accept-Language: de-DE,de;q=0.9\n\n"
+        
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            if let error = error {
+                resultLog += "❌ [URL测试] 网络错误: \(error.localizedDescription)\n"
+                completion(resultLog)
+                return
+            }
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                resultLog += "❌ [URL测试] 无效的HTTP响应\n"
+                completion(resultLog)
+                return
+            }
+            
+            resultLog += "📡 [URL测试] HTTP状态码: \(httpResponse.statusCode)\n"
+            
+            // 检查响应URL是否发生了重定向
+            if let responseURL = httpResponse.url?.absoluteString, responseURL != urlString {
+                resultLog += "🔄 [重定向检测] 原始URL: \(urlString)\n"
+                resultLog += "🔄 [重定向检测] 最终URL: \(responseURL)\n"
+                resultLog += "⚠️ [重定向检测] 检测到URL重定向，可能影响解析结果\n"
+            }
+            
+            if httpResponse.statusCode != 200 {
+                resultLog += "⚠️ [URL测试] 非200状态码，可能有问题\n"
+                if httpResponse.statusCode == 404 {
+                    resultLog += "❌ [URL测试] 404错误：页面不存在\n"
+                } else if httpResponse.statusCode >= 300 && httpResponse.statusCode < 400 {
+                    resultLog += "🔄 [URL测试] 重定向状态码：\(httpResponse.statusCode)\n"
+                }
+            } else {
+                resultLog += "✅ [URL测试] HTTP请求成功\n"
+            }
+            
+            guard let data = data else {
+                resultLog += "❌ [URL测试] 响应无数据\n"
+                completion(resultLog)
+                return
+            }
+            
+            resultLog += "📊 [URL测试] 数据大小: \(data.count) 字节\n"
+            
+            // 检查响应头中的内容类型
+            if let contentType = httpResponse.allHeaderFields["Content-Type"] as? String {
+                resultLog += "📄 [响应类型] Content-Type: \(contentType)\n"
+                if !contentType.contains("text/html") {
+                    resultLog += "⚠️ [响应类型] 不是HTML内容，可能影响解析\n"
+                }
+            }
+            
+            guard let htmlString = String(data: data, encoding: .utf8) else {
+                resultLog += "❌ [URL测试] 无法将数据解析为UTF-8字符串\n"
+                completion(resultLog)
+                return
+            }
+            
+            resultLog += "✅ [URL测试] 成功解析HTML字符串，长度: \(htmlString.count) 字符\n\n"
+            
+            // 检查HTML内容是否为商品页面
+            resultLog += "🔍 [页面分析] 检查页面类型...\n"
+            if htmlString.contains("1707") {
+                resultLog += "✅ [页面分析] 包含商品ID (1707)\n"
+            } else {
+                resultLog += "❌ [页面分析] 未找到商品ID (1707)，可能不是商品页面\n"
+            }
+            
+            if htmlString.lowercased().contains("the-monsters") {
+                resultLog += "✅ [页面分析] 包含商品名称 (THE-MONSTERS)\n"
+            } else {
+                resultLog += "❌ [页面分析] 未找到商品名称 (THE-MONSTERS)\n"
+            }
+            
+            if htmlString.lowercased().contains("checkmate") {
+                resultLog += "✅ [页面分析] 包含系列名称 (Checkmate)\n"
+            } else {
+                resultLog += "❌ [页面分析] 未找到系列名称 (Checkmate)\n"
+            }
+            
+            resultLog += "\n"
+            
+            // 使用增强的解析功能
+            if let productInfo = self?.extractProductPageInfo(from: htmlString, baseURL: urlString) {
+                resultLog += "🎉 [解析成功] 商品信息解析结果:\n"
+                resultLog += "   📛 商品名称: \(productInfo.name)\n"
+                resultLog += "   📝 商品描述: \(productInfo.description ?? "无描述")\n"
+                
+                // 从变体中获取价格信息
+                let priceInfo = productInfo.availableVariants.first?.price ?? "无价格"
+                resultLog += "   💰 价格: \(priceInfo)\n"
+                
+                // 检查整体库存状态
+                let isInStock = productInfo.availableVariants.contains { $0.isAvailable }
+                resultLog += "   📦 库存状态: \(isInStock ? "有货 ✅" : "缺货 ❌")\n"
+                resultLog += "   🔢 变体数量: \(productInfo.availableVariants.count)\n\n"
+                
+                // 详细变体信息
+                for (index, variant) in productInfo.availableVariants.enumerated() {
+                    resultLog += "   变体 \(index + 1):\n"
+                    resultLog += "     - 名称: \(variant.variantName ?? "未知")\n"
+                    resultLog += "     - 价格: \(variant.price ?? "无价格")\n"
+                    resultLog += "     - 状态: \(variant.isAvailable ? "有货" : "缺货")\n"
+                    if let sku = variant.sku {
+                        resultLog += "     - SKU: \(sku)\n"
+                    }
+                }
+            } else {
+                resultLog += "❌ [解析失败] 无法解析商品信息\n"
+            }
+            
+            // 添加HTML片段预览以便调试
+            resultLog += "\n🔍 [调试信息] HTML片段预览:\n"
+            let htmlPreview = String(htmlString.prefix(1000))
+            resultLog += "前1000字符: \(htmlPreview)\n"
+            
+            // 搜索页面标题
+            if let titleMatch = htmlString.range(of: #"<title>(.*?)</title>"#, options: [.regularExpression, .caseInsensitive]) {
+                let title = String(htmlString[titleMatch])
+                resultLog += "\n📋 [页面标题] \(title)\n"
+            }
+            
+            if htmlString.contains("€") {
+                resultLog += "\n💰 [价格调试] 发现欧元符号，搜索价格相关片段:\n"
+                // 搜索包含€的行
+                let lines = htmlString.components(separatedBy: "\n")
+                var priceLines: [String] = []
+                for line in lines {
+                    if line.contains("€") && priceLines.count < 10 {
+                        let cleanLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !cleanLine.isEmpty && cleanLine.count < 200 {
+                            priceLines.append(cleanLine)
+                        }
+                    }
+                }
+                resultLog += priceLines.joined(separator: "\n")
+            }
+            
+            if htmlString.lowercased().contains("warenkorb") || htmlString.lowercased().contains("cart") {
+                resultLog += "\n🛒 [按钮调试] 发现购物车相关内容，搜索按钮片段:\n"
+                let lines = htmlString.components(separatedBy: "\n")
+                var buttonLines: [String] = []
+                for line in lines {
+                    let lowercaseLine = line.lowercased()
+                    if (lowercaseLine.contains("warenkorb") || lowercaseLine.contains("cart") || lowercaseLine.contains("button")) && buttonLines.count < 10 {
+                        let cleanLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !cleanLine.isEmpty && cleanLine.count < 200 {
+                            buttonLines.append(cleanLine)
+                        }
+                    }
+                }
+                resultLog += buttonLines.joined(separator: "\n")
+            }
+            
+            completion(resultLog)
+        }
+        
+        task.resume()
+    }
+    
+    // 增强的图片提取
+    private func extractEnhancedImage(from html: String, baseURL: String) -> String? {
+        let patterns = [
+            // Open Graph图片
+            #"<meta\s+property=[\"']og:image[\"']\s+content=[\"']([^\"']+)[\"']"#,
+            // JSON-LD图片
+            #""image\"\s*:\s*\"([^\"]+)\""#,
+            // 主产品图片
+            #"<img[^>]*class=[\"'][^\"']*product[^\"']*image[^\"']*[\"'][^>]*src=[\"']([^\"']+)[\"']"#,
+            #"<img[^>]*src=[\"']([^\"']+)[\"'][^>]*class=[\"'][^\"']*product[^\"']*image[^\"']*[\"']"#,
+            // 通用图片选择器
+            #"<img[^>]*src=[\"']([^\"']+\.(?:jpg|jpeg|png|webp))[\"']"#
+        ]
+        
+        for pattern in patterns {
+            if let imageURL = extractFirstMatch(pattern: pattern, from: html) {
+                // 将相对URL转换为绝对URL
+                if imageURL.hasPrefix("http") {
+                    return imageURL
+                } else if imageURL.hasPrefix("//") {
+                    return "https:" + imageURL
+                } else if imageURL.hasPrefix("/") {
+                    if let url = URL(string: baseURL),
+                       let host = url.host {
+                        return "https://\(host)\(imageURL)"
+                    }
+                }
+            }
+        }
+        
+        return nil
+    }
+    
+    // 辅助方法：提取第一个匹配项
+    private func extractFirstMatch(pattern: String, from html: String) -> String? {
+        let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        let nsString = html as NSString
+        if let match = regex?.firstMatch(in: html, options: [], range: NSRange(location: 0, length: nsString.length)) {
+            if match.numberOfRanges >= 2 {
+                return nsString.substring(with: match.range(at: 1))
+            }
+        }
+        return nil
+    }
+    
+    // 测试特定URL的解析能力 - 增强版浏览器模拟
+    func testURLAdvanced(_ urlString: String, completion: @escaping (String) -> Void) {
+        var resultLog = ""
+        resultLog += "🔍 [URL测试] 开始测试URL: \(urlString)\n"
+        resultLog += "⏰ [URL测试] 时间: \(Date())\n\n"
+        
+        guard let url = URL(string: urlString) else {
+            resultLog += "❌ [URL测试] 无效的URL格式\n"
+            completion(resultLog)
+            return
+        }
+        
+        // 创建增强的URLSessionConfiguration
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        
+        // 设置Cookie存储
+        let cookieStorage = HTTPCookieStorage.shared
+        configuration.httpCookieStorage = cookieStorage
+        
+        let session = URLSession(configuration: configuration)
+        
+        var request = URLRequest(url: url)
+        
+        // 设置完整的Chrome浏览器Headers
+        let headers = [
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "sec-ch-ua": "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"macOS\"",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "DNT": "1"
+        ]
+        
+        // 添加Referer header模拟从搜索或主页进入
+        if urlString.contains("popmart.com") {
+            request.setValue("https://www.popmart.com/de/", forHTTPHeaderField: "Referer")
+        }
+        
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        
+        // 预设德国本地化Cookies
+        let germanCookies = [
+            "locale=de",
+            "region=DE", 
+            "currency=EUR",
+            "country=DE",
+            "language=de",
+            "timezone=Europe/Berlin",
+            "visited=true",
+            "consent=accepted"
+        ]
+        
+        if let cookieURL = URL(string: "https://www.popmart.com") {
+            for cookieString in germanCookies {
+                let parts = cookieString.split(separator: "=")
+                if parts.count == 2 {
+                    let cookie = HTTPCookie(properties: [
+                        .domain: ".popmart.com",
+                        .path: "/",
+                        .name: String(parts[0]),
+                        .value: String(parts[1])
+                    ])
+                    if let cookie = cookie {
+                        cookieStorage.setCookie(cookie)
+                    }
+                }
+            }
+        }
+        
+        resultLog += "📤 [请求详情] 设置增强的浏览器模拟\n"
+        resultLog += "🌐 [请求详情] User-Agent: Chrome/120 (macOS)\n"
+        resultLog += "🇩🇪 [请求详情] Accept-Language: de-DE,de;q=0.9\n"
+        resultLog += "🍪 [请求详情] Cookies: locale=de; region=DE; currency=EUR\n"
+        resultLog += "🔒 [请求详情] Sec-CH-UA Headers: 已设置\n"
+        resultLog += "🔄 [请求详情] Referer: https://www.popmart.com/de/\n\n"
+        
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            if let error = error {
+                resultLog += "❌ [URL测试] 请求失败: \(error.localizedDescription)\n"
+                completion(resultLog)
+                return
+            }
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                resultLog += "❌ [URL测试] 无效的HTTP响应\n"
+                completion(resultLog)
+                return
+            }
+            
+            resultLog += "📡 [URL测试] HTTP状态码: \(httpResponse.statusCode)\n"
+            
+            // 检查重定向
+            if let finalURL = httpResponse.url?.absoluteString, finalURL != urlString {
+                resultLog += "🔄 [重定向检测] 重定向到: \(finalURL)\n"
+            } else {
+                resultLog += "✅ [重定向检测] 未发生重定向，URL正确\n"
+            }
+            
+            // 检查Set-Cookie
+            if let cookies = httpResponse.allHeaderFields["Set-Cookie"] as? String {
+                resultLog += "🍪 [响应Cookies] \(cookies)\n"
+            }
+            
+            guard let data = data else {
+                resultLog += "❌ [URL测试] 未收到数据\n"
+                completion(resultLog)
+                return
+            }
+            
+            resultLog += "✅ [URL测试] HTTP请求成功\n"
+            resultLog += "📊 [URL测试] 数据大小: \(data.count) 字节\n"
+            
+            if let contentType = httpResponse.allHeaderFields["Content-Type"] as? String {
+                resultLog += "📄 [响应类型] Content-Type: \(contentType)\n"
+            }
+            
+            guard let htmlString = String(data: data, encoding: .utf8) else {
+                resultLog += "❌ [URL测试] 无法解析HTML字符串\n"
+                completion(resultLog)
+                return
+            }
+            
+            resultLog += "✅ [URL测试] 成功解析HTML字符串，长度: \(htmlString.count) 字符\n\n"
+            
+            // 页面内容分析
+            resultLog += "🔍 [页面分析] 详细检查页面内容...\n"
+            
+            // 检查特定商品标识
+            let productId = "1707"
+            let productName = "THE-MONSTERS"
+            let seriesName = "Checkmate"
+            
+            if htmlString.contains(productId) {
+                resultLog += "✅ [页面分析] 找到商品ID (\(productId))\n"
+            } else {
+                resultLog += "❌ [页面分析] HTML中未找到商品ID (\(productId))\n"
+            }
+            
+            if htmlString.lowercased().contains(productName.lowercased()) {
+                resultLog += "✅ [页面分析] 找到商品名称 (\(productName))\n"
+            } else {
+                resultLog += "❌ [页面分析] HTML中未找到商品名称 (\(productName))\n"
+            }
+            
+            if htmlString.lowercased().contains(seriesName.lowercased()) {
+                resultLog += "✅ [页面分析] 找到系列名称 (\(seriesName))\n"
+            } else {
+                resultLog += "❌ [页面分析] HTML中未找到系列名称 (\(seriesName))\n"
+            }
+            
+            // 检查页面特征
+            let pageIndicators = [
+                "product-details", "add-to-cart", "warenkorb", 
+                "ausverkauft", "price", "variant", "sku",
+                "product-info", "buy-button", "cart"
+            ]
+            
+            var foundIndicators: [String] = []
+            for indicator in pageIndicators {
+                if htmlString.lowercased().contains(indicator) {
+                    foundIndicators.append(indicator)
+                }
+            }
+            
+            if !foundIndicators.isEmpty {
+                resultLog += "🛍️ [商品页面特征] 找到商品页面指标: \(foundIndicators.joined(separator: ", "))\n"
+            } else {
+                resultLog += "❌ [商品页面特征] 未找到商品页面特征，可能是主页或其他页面\n"
+            }
+            
+            // 检查JavaScript内容
+            let jsPattern = #"<script[^>]*>.*?</script>"#
+            let jsMatches = htmlString.matches(of: try! Regex(jsPattern))
+            resultLog += "📜 [JavaScript检测] 找到 \(jsMatches.count) 个脚本标签\n"
+            
+            if htmlString.contains("window.__INITIAL_STATE__") || htmlString.contains("__NEXT_DATA__") {
+                resultLog += "⚙️ [JavaScript检测] 检测到SPA应用，内容可能需要JavaScript渲染\n"
+            }
+            
+            // 搜索可能的API端点
+            let apiPatterns = [
+                #"/api/products/\d+"#,
+                #"/api/v\d+/products"#,
+                #"product-api"#,
+                #"graphql"#,
+                #"/api/catalog"#
+            ]
+            
+            var foundApis: [String] = []
+            for pattern in apiPatterns {
+                let matches = htmlString.matches(of: try! Regex(pattern))
+                if !matches.isEmpty {
+                    for match in matches.prefix(3) {
+                        foundApis.append(String(match.0))
+                    }
+                }
+            }
+            
+            if !foundApis.isEmpty {
+                resultLog += "🔍 [API发现] 发现可能的API端点: \(foundApis.joined(separator: ", "))\n"
+            }
+            
+            resultLog += "\n"
+            
+            // 使用增强的解析功能
+            if let productInfo = self?.extractProductPageInfo(from: htmlString, baseURL: urlString) {
+                resultLog += "🎉 [解析结果] 商品信息解析结果:\n"
+                resultLog += "   📛 商品名称: \(productInfo.name)\n"
+                resultLog += "   📝 商品描述: \(productInfo.description ?? "无描述")\n"
+                
+                // 从变体中获取价格信息
+                let priceInfo = productInfo.availableVariants.first?.price ?? "无价格"
+                resultLog += "   💰 价格: \(priceInfo)\n"
+                
+                // 检查整体库存状态
+                let isInStock = productInfo.availableVariants.contains { $0.isAvailable }
+                resultLog += "   📦 库存状态: \(isInStock ? "有货 ✅" : "缺货 ❌")\n"
+                resultLog += "   🔢 变体数量: \(productInfo.availableVariants.count)\n\n"
+                
+                // 详细变体信息
+                for (index, variant) in productInfo.availableVariants.enumerated() {
+                    resultLog += "   变体 \(index + 1):\n"
+                    resultLog += "     - 名称: \(variant.variantName ?? "未知")\n"
+                    resultLog += "     - 价格: \(variant.price ?? "无价格")\n"
+                    resultLog += "     - 状态: \(variant.isAvailable ? "有货" : "缺货")\n"
+                    if let sku = variant.sku {
+                        resultLog += "     - SKU: \(sku)\n"
+                    }
+                }
+            } else {
+                resultLog += "❌ [解析失败] 无法解析商品信息\n"
+                resultLog += "💡 [建议] 可能需要使用WebView来渲染JavaScript内容\n"
+            }
+            
+            // 添加关键HTML片段分析
+            resultLog += "\n🔍 [关键内容分析]\n"
+            
+            // 查找JSON数据
+            if htmlString.contains("__NEXT_DATA__") {
+                resultLog += "🔍 [Next.js数据] 检测到Next.js应用数据\n"
+                if let jsonStart = htmlString.range(of: "__NEXT_DATA__\" type=\"application/json\">")?.upperBound,
+                   let jsonEnd = htmlString[jsonStart...].range(of: "</script>")?.lowerBound {
+                    let jsonString = String(htmlString[jsonStart..<jsonEnd])
+                    resultLog += "📄 [JSON数据] 尝试解析Next.js数据...\n"
+                    
+                    // 尝试解析JSON数据
+                    if let jsonData = jsonString.data(using: .utf8) {
+                        do {
+                            if let jsonObject = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                                resultLog += "✅ [JSON解析] 成功解析Next.js数据\n"
+                                
+                                // 查找产品信息
+                                if let props = jsonObject["props"] as? [String: Any],
+                                   let pageProps = props["pageProps"] as? [String: Any] {
+                                    resultLog += "🔍 [产品搜索] 在pageProps中搜索产品数据...\n"
+                                    
+                                    // 递归搜索产品相关数据
+                                    let productData = self?.searchForProductData(in: pageProps, path: "pageProps")
+                                    if let productInfo = productData, !productInfo.isEmpty {
+                                        resultLog += "🎉 [产品发现] 找到产品数据:\n\(productInfo)\n"
+                                    } else {
+                                        resultLog += "⚠️ [产品搜索] pageProps为空，可能需要客户端渲染\n"
+                                        
+                                        // 尝试从更深层次搜索
+                                        let allData = self?.searchForProductData(in: jsonObject, path: "root")
+                                        if let allInfo = allData, !allInfo.isEmpty {
+                                            resultLog += "🔍 [深度搜索] 在完整JSON中找到相关数据:\n\(allInfo)\n"
+                                        }
+                                    }
+                                }
+                                
+                                // 查找query参数
+                                if let query = jsonObject["query"] as? [String: Any] {
+                                    if query.isEmpty {
+                                        resultLog += "⚠️ [路由问题] Query参数为空，URL路由可能未正确解析\n"
+                                    } else {
+                                        resultLog += "🔍 [路由信息] Query参数: \(query)\n"
+                                    }
+                                }
+                                
+                                // 查找buildId和page信息
+                                if let page = jsonObject["page"] as? String {
+                                    resultLog += "📍 [路由信息] 页面路径: \(page)\n"
+                                    if page.contains("[...queryParams]") {
+                                        resultLog += "💡 [路由分析] 使用动态路由，需要正确的URL参数解析\n"
+                                    }
+                                }
+                                
+                                if let buildId = jsonObject["buildId"] as? String {
+                                    resultLog += "🏗️ [构建信息] Build ID: \(buildId)\n"
+                                }
+                                
+                                // 检查是否有额外的数据源
+                                if let runtimeConfig = jsonObject["runtimeConfig"] as? [String: Any] {
+                                    resultLog += "⚙️ [运行时配置] 发现运行时配置数据\n"
+                                    if let countries = runtimeConfig["COUNTRYS"] as? [String] {
+                                        if countries.contains("de") {
+                                            resultLog += "✅ [地区支持] 确认支持德国(de)地区\n"
+                                        }
+                                    }
+                                }
+                            }
+                        } catch {
+                            resultLog += "❌ [JSON解析] 解析失败: \(error.localizedDescription)\n"
+                        }
+                    }
+                    
+                    let jsonSnippet = String(jsonString.prefix(500))
+                    resultLog += "📄 [JSON片段] \(jsonSnippet)...\n"
+                } else {
+                    if let jsonStart = htmlString.range(of: "__NEXT_DATA__")?.upperBound,
+                       let jsonEnd = htmlString[jsonStart...].range(of: "</script>")?.lowerBound {
+                        let jsonSnippet = String(htmlString[jsonStart..<jsonEnd]).prefix(500)
+                        resultLog += "📄 [JSON片段] \(jsonSnippet)...\n"
+                    }
+                }
+            }
+            
+            // 查找产品相关的DOM结构
+            let domPatterns = [
+                #"class="[^"]*product[^"]*""#,
+                #"id="[^"]*product[^"]*""#,
+                #"data-[^=]*product[^=]*="[^"]*""#
+            ]
+            
+            for pattern in domPatterns {
+                let matches = htmlString.matches(of: try! Regex(pattern))
+                if !matches.isEmpty {
+                    resultLog += "🏗️ [DOM结构] 找到产品相关元素: \(matches.count) 个\n"
+                    break
+                }
+            }
+            
+            // 搜索价格信息
+            if htmlString.contains("€") {
+                resultLog += "\n💰 [价格调试] 欧元符号相关内容:\n"
+                let lines = htmlString.components(separatedBy: "\n")
+                var priceLines: [String] = []
+                for line in lines {
+                    if line.contains("€") && priceLines.count < 5 {
+                        let cleanLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !cleanLine.isEmpty && cleanLine.count < 300 && !cleanLine.hasPrefix("<script") {
+                            priceLines.append(cleanLine)
+                        }
+                    }
+                }
+                resultLog += priceLines.joined(separator: "\n")
+            }
+            
+            completion(resultLog)
+        }
+        
+        task.resume()
+    }
 }
 
 // 通用价格提取方法
@@ -1835,24 +2877,207 @@ private func extractPrice(from html: String) -> String? {
     return nil
 }
 
-// 提取商品名称
-private func extractProductName(from html: String) -> String? {
+// 提取商品名称 - 增强版
+private func extractProductName(from html: String, baseURL: String) -> String? {
+    // 扩展的商品名称匹配模式，针对不同网站结构
     let namePatterns = [
+        // Popmart 网站特有模式
         #"<h1[^>]*class="[^"]*product[^"]*title[^"]*"[^>]*>(.*?)</h1>"#,
-        #"<h1[^>]*>(.*?)</h1>"#,
+        #"<h1[^>]*class="[^"]*title[^"]*"[^>]*>(.*?)</h1>"#,
+        #"<div[^>]*class="[^"]*product[^"]*name[^"]*"[^>]*>(.*?)</div>"#,
+        #"<span[^>]*class="[^"]*product[^"]*title[^"]*"[^>]*>(.*?)</span>"#,
+        
+        // JSON-LD 结构化数据
+        #""name"\s*:\s*"([^"]+)""#,
+        #""@type"\s*:\s*"Product".*?"name"\s*:\s*"([^"]+)""#,
+        
+        // Open Graph 元标签
         #"<meta[^>]*property="og:title"[^>]*content="([^"]+)""#,
+        #"<meta[^>]*name="twitter:title"[^>]*content="([^"]+)""#,
+        
+        // 标准HTML标签
+        #"<h1[^>]*>(.*?)</h1>"#,
+        #"<h2[^>]*class="[^"]*product[^"]*"[^>]*>(.*?)</h2>"#,
+        
+        // 通用元标签
+        #"<meta[^>]*name="title"[^>]*content="([^"]+)""#,
+        #"<meta[^>]*property="title"[^>]*content="([^"]+)""#,
+        
+        // 页面标题（最后备选）
         #"<title>(.*?)</title>"#
     ]
     
-    for pattern in namePatterns {
-        if let range = html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
-            let match = String(html[range])
-            let cleanedName = match.replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
-                .replacingOccurrences(of: #"content="|""#, with: "", options: [.regularExpression])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+    print("🔍 [商品解析] 开始提取商品名称，使用 \(namePatterns.count) 种模式...")
+    
+    for (index, pattern) in namePatterns.enumerated() {
+        do {
+            let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+            let range = NSRange(location: 0, length: html.count)
             
-            if !cleanedName.isEmpty {
-                return cleanedName
+            if let match = regex.firstMatch(in: html, options: [], range: range) {
+                let captureRange = match.numberOfRanges > 1 ? match.range(at: 1) : match.range(at: 0)
+                
+                if let nameRange = Range(captureRange, in: html) {
+                    var cleanedName = String(html[nameRange])
+                    
+                    // 清理HTML标签和特殊字符
+                    cleanedName = cleanedName
+                        .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                        .replacingOccurrences(of: "&amp;", with: "&")
+                        .replacingOccurrences(of: "&quot;", with: "\"")
+                        .replacingOccurrences(of: "&lt;", with: "<")
+                        .replacingOccurrences(of: "&gt;", with: ">")
+                        .replacingOccurrences(of: "&#39;", with: "'")
+                        .replacingOccurrences(of: "&nbsp;", with: " ")
+                        .replacingOccurrences(of: "\n", with: " ")
+                        .replacingOccurrences(of: "\t", with: " ")
+                        .replacingOccurrences(of: #"\s+"#, with: " ", options: [.regularExpression])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    // 验证商品名称的有效性
+                    if isValidProductName(cleanedName) {
+                        print("✅ [商品解析] 使用模式 \(index + 1) 成功提取商品名称: \(cleanedName)")
+                        return cleanedName
+                    } else {
+                        print("⚠️ [商品解析] 模式 \(index + 1) 匹配但名称无效: \(cleanedName)")
+                    }
+                }
+            }
+        } catch {
+            print("❌ [商品解析] 正则表达式模式 \(index + 1) 编译失败: \(error)")
+            continue
+        }
+    }
+    
+    print("❌ [商品解析] 所有模式都无法提取有效的商品名称")
+    
+    // 尝试从URL中提取可能的商品名称作为备选方案
+    if let urlBasedName = extractNameFromURL(baseURL) {
+        print("🔄 [商品解析] 从URL中提取备选名称: \(urlBasedName)")
+        return urlBasedName
+    }
+    
+    return nil
+}
+
+// 验证商品名称的有效性
+private func isValidProductName(_ name: String) -> Bool {
+    // 检查基本条件
+    guard !name.isEmpty else { return false }
+    guard name.count >= 3 else { return false }  // 名称至少3个字符
+    guard name.count <= 200 else { return false } // 名称不超过200个字符
+    
+    // 排除常见的无效名称
+    let invalidNames = [
+        "popmart", "amazon", "shop", "store", "product", "item",
+        "loading", "error", "404", "not found", "页面", "网站",
+        "home", "首页", "商城", "购物", "title", "untitled"
+    ]
+    
+    let lowerName = name.lowercased()
+    for invalid in invalidNames {
+        if lowerName == invalid || lowerName.contains("- \(invalid)") || lowerName.contains("\(invalid) -") {
+            return false
+        }
+    }
+    
+    // 检查是否只包含特殊字符或数字
+    let alphanumericCount = name.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.count
+    if alphanumericCount < 2 {
+        return false
+    }
+    
+    return true
+}
+
+// 从URL中提取可能的商品名称
+private func extractNameFromURL(_ url: String) -> String? {
+    guard let urlComponents = URLComponents(string: url) else { return nil }
+    
+    let pathComponents = urlComponents.path.components(separatedBy: "/").filter { !$0.isEmpty }
+    
+    // 查找可能的商品名称部分
+    for component in pathComponents.reversed() {
+        // 跳过常见的非商品名称部分
+        if ["products", "product", "p", "items", "item", "de", "en", "www", "shop"].contains(component.lowercased()) {
+            continue
+        }
+        
+        // 跳过纯数字的部分（通常是ID）
+        if component.allSatisfy({ $0.isNumber }) {
+            continue
+        }
+        
+        // 清理URL编码和特殊字符
+        var cleanedName = component
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "%20", with: " ")
+            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)?
+            .removingPercentEncoding ?? component
+        
+        // 首字母大写处理
+        cleanedName = cleanedName.capitalized
+        
+        if isValidProductName(cleanedName) {
+            return cleanedName
+        }
+    }
+    
+    return nil
+}
+
+// 提取商品描述
+private func extractProductDescription(from html: String) -> String? {
+    let descriptionPatterns = [
+        #"<div[^>]*class="[^"]*description[^"]*"[^>]*>(.*?)</div>"#,
+        #"<div[^>]*class="[^"]*product[^"]*description[^"]*"[^>]*>(.*?)</div>"#,
+        #"<meta[^>]*name="description"[^>]*content="([^"]+)""#,
+        #"<meta[^>]*property="og:description"[^>]*content="([^"]+)""#
+    ]
+    
+    for pattern in descriptionPatterns {
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+            let range = NSRange(location: 0, length: html.count)
+            if let match = regex.firstMatch(in: html, options: [], range: range) {
+                if let descRange = Range(match.range(at: 1), in: html) {
+                    let description = String(html[descRange])
+                        .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    if !description.isEmpty && description.count > 10 {
+                        return description
+                    }
+                }
+            }
+        }
+    }
+    
+    return nil
+}
+
+// 提取商品品牌
+private func extractProductBrand(from html: String) -> String? {
+    let brandPatterns = [
+        #"<span[^>]*class="[^"]*brand[^"]*"[^>]*>(.*?)</span>"#,
+        #"<div[^>]*class="[^"]*brand[^"]*"[^>]*>(.*?)</div>"#,
+        #"<meta[^>]*property="product:brand"[^>]*content="([^"]+)""#,
+        #""brand"\s*:\s*"([^"]+)""#
+    ]
+    
+    for pattern in brandPatterns {
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+            let range = NSRange(location: 0, length: html.count)
+            if let match = regex.firstMatch(in: html, options: [], range: range) {
+                if let brandRange = Range(match.range(at: 1), in: html) {
+                    let brand = String(html[brandRange])
+                        .replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    if !brand.isEmpty {
+                        return brand
+                    }
+                }
             }
         }
     }
@@ -2012,5 +3237,167 @@ extension ProductMonitor {
         }
         
         return productInfo.joined(separator: " | ")
+    }
+}
+
+// MARK: - Next.js数据解析辅助方法
+extension ProductMonitor {
+    // 递归搜索产品相关数据
+    private func searchForProductData(in data: Any, path: String) -> String? {
+        var result: [String] = []
+        
+        if let dict = data as? [String: Any] {
+            for (key, value) in dict {
+                let currentPath = "\(path).\(key)"
+                
+                // 检查是否是产品相关的key
+                if isProductRelatedKey(key) {
+                    if let stringValue = value as? String {
+                        result.append("\(currentPath): \(stringValue)")
+                    } else if let numberValue = value as? NSNumber {
+                        result.append("\(currentPath): \(numberValue)")
+                    } else if let boolValue = value as? Bool {
+                        result.append("\(currentPath): \(boolValue)")
+                    }
+                }
+                
+                // 递归搜索（限制深度避免无限递归）
+                if path.components(separatedBy: ".").count < 5 {
+                    if let subResult = searchForProductData(in: value, path: currentPath) {
+                        result.append(subResult)
+                    }
+                }
+            }
+        } else if let array = data as? [Any] {
+            for (index, item) in array.enumerated() {
+                let currentPath = "\(path)[\(index)]"
+                if let subResult = searchForProductData(in: item, path: currentPath) {
+                    result.append(subResult)
+                }
+            }
+        }
+        
+        return result.isEmpty ? nil : result.joined(separator: "\n")
+    }
+    
+    // 检查是否是产品相关的key
+    private func isProductRelatedKey(_ key: String) -> Bool {
+        let productKeys = [
+            "name", "title", "product", "item",
+            "price", "cost", "amount", "value",
+            "stock", "available", "inventory", "quantity",
+            "sku", "id", "productId", "itemId",
+            "description", "summary", "details",
+            "brand", "manufacturer", "seller",
+            "image", "thumbnail", "photo", "picture",
+            "category", "type", "variant", "option",
+            "status", "state", "condition",
+            "url", "link", "permalink"
+        ]
+        
+        let lowerKey = key.lowercased()
+        return productKeys.contains { lowerKey.contains($0) }
+    }
+}
+
+// MARK: - 直接API调用方法
+extension ProductMonitor {
+    
+    // 尝试直接调用Popmart API获取产品信息
+    func testDirectAPI(_ productId: String, completion: @escaping (String) -> Void) {
+        var resultLog = ""
+        resultLog += "🚀 [API测试] 开始直接API调用测试\n"
+        resultLog += "🎯 [API测试] 产品ID: \(productId)\n"
+        resultLog += "⏰ [API测试] 时间: \(Date())\n\n"
+        
+        // 可能的API端点
+        let apiEndpoints = [
+            "https://www.popmart.com/api/v1/products/\(productId)",
+            "https://www.popmart.com/api/products/\(productId)",
+            "https://api.popmart.com/v1/products/\(productId)",
+            "https://www.popmart.com/de/api/products/\(productId)",
+            "https://www.popmart.com/_next/data/20250528201128/de/products/\(productId).json",
+            "https://cdn-global-eude.popmart.com/global-web/eude-prod/20250528201128/_next/static/chunks/pages/products/[...queryParams].js"
+        ]
+        
+        var completedRequests = 0
+        let totalRequests = apiEndpoints.count
+        
+        for (index, endpoint) in apiEndpoints.enumerated() {
+            resultLog += "🔍 [API测试 \(index + 1)] 测试端点: \(endpoint)\n"
+            
+            guard let url = URL(string: endpoint) else {
+                resultLog += "❌ [API测试 \(index + 1)] 无效URL\n"
+                completedRequests += 1
+                if completedRequests == totalRequests {
+                    completion(resultLog)
+                }
+                continue
+            }
+            
+            var request = URLRequest(url: url)
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+            request.setValue("de-DE,de;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
+            request.setValue("https://www.popmart.com/de/", forHTTPHeaderField: "Referer")
+            request.setValue("locale=de; region=DE; currency=EUR", forHTTPHeaderField: "Cookie")
+            
+            let task = URLSession.shared.dataTask(with: request) { data, response, error in
+                defer {
+                    completedRequests += 1
+                    if completedRequests == totalRequests {
+                        DispatchQueue.main.async {
+                            completion(resultLog)
+                        }
+                    }
+                }
+                
+                if let error = error {
+                    resultLog += "❌ [API测试 \(index + 1)] 请求失败: \(error.localizedDescription)\n"
+                    return
+                }
+                
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    resultLog += "❌ [API测试 \(index + 1)] 无效响应\n"
+                    return
+                }
+                
+                resultLog += "📡 [API测试 \(index + 1)] 状态码: \(httpResponse.statusCode)\n"
+                
+                if httpResponse.statusCode == 200 {
+                    if let data = data, let jsonString = String(data: data, encoding: .utf8) {
+                        resultLog += "✅ [API测试 \(index + 1)] 成功！数据长度: \(data.count) 字节\n"
+                        
+                        // 尝试解析JSON
+                        if let jsonData = jsonString.data(using: .utf8) {
+                            do {
+                                let jsonObject = try JSONSerialization.jsonObject(with: jsonData)
+                                resultLog += "📊 [API测试 \(index + 1)] JSON解析成功\n"
+                                
+                                // 查找产品相关信息
+                                if let productData = self.searchForProductData(in: jsonObject, path: "api_response") {
+                                    resultLog += "🎉 [API测试 \(index + 1)] 找到产品数据:\n\(productData)\n"
+                                }
+                            } catch {
+                                resultLog += "⚠️ [API测试 \(index + 1)] JSON解析失败，可能是HTML或其他格式\n"
+                            }
+                        }
+                        
+                        let preview = String(jsonString.prefix(200))
+                        resultLog += "📄 [API测试 \(index + 1)] 内容预览: \(preview)...\n"
+                    }
+                } else if httpResponse.statusCode == 404 {
+                    resultLog += "❌ [API测试 \(index + 1)] 404 - 端点不存在\n"
+                } else if httpResponse.statusCode == 403 {
+                    resultLog += "🔒 [API测试 \(index + 1)] 403 - 访问被拒绝\n"
+                } else {
+                    resultLog += "⚠️ [API测试 \(index + 1)] 状态码: \(httpResponse.statusCode)\n"
+                }
+                
+                resultLog += "\n"
+            }
+            
+            task.resume()
+        }
     }
 }

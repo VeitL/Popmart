@@ -35,12 +35,12 @@ enum ProductVariant: String, Codable, CaseIterable {
     }
 }
 
-// 改进：变体详细信息结构体，包含独立的监控状态
+// MARK: - 变体详细信息
 struct VariantDetail: Codable, Identifiable {
     let id: UUID
     let variant: ProductVariant
     let name: String
-    let price: String?
+    var price: String?
     var isAvailable: Bool
     let url: String
     let imageURL: String?
@@ -87,10 +87,10 @@ struct VariantDetail: Codable, Identifiable {
     }
 }
 
-// 改进：产品结构体支持多个变体
+// MARK: - 产品结构体
 struct Product: Identifiable, Codable {
     let id: UUID
-    let baseURL: String  // 产品的基础URL
+    let baseURL: String
     var name: String
     var imageURL: String?
     var monitoringInterval: TimeInterval
@@ -115,6 +115,12 @@ struct Product: Identifiable, Codable {
     // 兼容旧版本的属性
     var checkCount: Int { totalChecks }
     var successCount: Int { successfulChecks }
+    
+    // 调试功能
+    var enableDebugLogging: Bool = false
+    
+    // 新增：商品级别的统计信息
+    var availabilityHistory: [AvailabilityChange] = []
     
     // 单变体产品初始化器（向后兼容）
     init(url: String, 
@@ -164,9 +170,9 @@ struct Product: Identifiable, Codable {
     }
     
     // 更新特定变体
-    mutating func updateVariant(_ variant: VariantDetail) {
-        if let index = variants.firstIndex(where: { $0.id == variant.id }) {
-            variants[index] = variant
+    mutating func updateVariant(_ updatedVariant: VariantDetail) {
+        if let index = variants.firstIndex(where: { $0.id == updatedVariant.id }) {
+            variants[index] = updatedVariant
         }
     }
     
@@ -223,6 +229,7 @@ struct ProductPageInfo: Codable {
     }
 }
 
+// MARK: - 其他枚举和结构体
 enum ProductStatus {
     case available
     case outOfStock
@@ -230,7 +237,7 @@ enum ProductStatus {
     case unknown
 }
 
-// Hermes表格数据模型
+// MARK: - Hermes表格数据模型
 struct HermesFormData: Codable, Identifiable {
     var id = UUID()
     var lastName: String
@@ -306,5 +313,24 @@ enum HermesSubmissionStatus: String, Codable, CaseIterable {
         case .blocked:
             return "shield.slash.fill"
         }
+    }
+}
+
+// MARK: - 可用性变化记录
+struct AvailabilityChange: Codable {
+    let timestamp: Date
+    let variantId: UUID
+    let variantName: String
+    let wasAvailable: Bool
+    let isAvailable: Bool
+    let price: String?
+    
+    init(variantId: UUID, variantName: String, wasAvailable: Bool, isAvailable: Bool, price: String? = nil) {
+        self.timestamp = Date()
+        self.variantId = variantId
+        self.variantName = variantName
+        self.wasAvailable = wasAvailable
+        self.isAvailable = isAvailable
+        self.price = price
     }
 } 

@@ -1,0 +1,954 @@
+//
+//  ProductMonitor.swift
+//  Popmart
+//
+//  Created by Guanchenuous on 29.05.25.
+//
+
+import Foundation
+import Combine
+import SwiftUI
+import WebKit
+import OSLog
+
+class ProductMonitor: ObservableObject {
+    @Published var products: [Product] = []
+    @Published var monitorLogs: [MonitorLog] = []
+    @Published var lastError: String?
+    
+    private var productTimers: [UUID: Timer] = [:]
+    private var variantTimers: [String: Timer] = [:]  // 新增：变体定时器，key格式为 "productId_variantId"
+    private var cancellables = Set<AnyCancellable>()
+    
+    // 反爬虫用户代理池
+    private let userAgents = [
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ]
+    
+    // 请求头池
+    private let acceptLanguages = [
+        "zh-CN,zh;q=0.9,en;q=0.8",
+        "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+        "de-DE,de;q=0.9,en;q=0.8",
+        "ja-JP,ja;q=0.9,en;q=0.8"
+    ]
+    
+    // 计算属性：是否有任何产品在监控中
+    var isAnyMonitoring: Bool {
+        products.contains { $0.isMonitoring }
+    }
+    
+    // 添加日志记录器
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.popmart", category: "ProductMonitor")
+    
+    init() {
+        loadProducts()
+        loadLogs()
+        // 添加默认商品
+        if products.isEmpty {
+            addProduct(url: "https://www.popmart.com/de/products/1991/THE-MONSTERS-Big-into-Energy-Series-Vinyl-Plush-Pendant-Blind-Box", 
+                      name: "THE MONSTERS Big into Energy Series Vinyl Plush Pendant Blind Box")
+        }
+        // 恢复监控状态
+        restoreMonitoringStates()
+    }
+    
+    // MARK: - 商品管理
+    func addProduct(url: String, name: String, variant: ProductVariant = .singleBox, imageURL: String? = nil, monitoringInterval: TimeInterval = 300, autoStart: Bool = false) {
+        let product = Product(url: url, name: name, variant: variant, imageURL: imageURL, monitoringInterval: monitoringInterval, autoStart: autoStart)
+        products.append(product)
+        saveProducts()
+        addLog(for: product, status: .success, message: "商品已添加到监控列表")
+        
+        if autoStart {
+            startMonitoring(for: product.id)
+        }
+    }
+    
+    // 新增：添加多变体产品
+    func addMultiVariantProduct(baseURL: String, name: String, variants: [VariantDetail], imageURL: String? = nil, monitoringInterval: TimeInterval = 300, autoStart: Bool = false) {
+        let product = Product(baseURL: baseURL, name: name, variants: variants, imageURL: imageURL, monitoringInterval: monitoringInterval, autoStart: autoStart)
+        products.append(product)
+        saveProducts()
+        addLog(for: product, status: .success, message: "多变体商品已添加到监控列表 (\(variants.count)个变体)")
+        
+        if autoStart {
+            startMonitoring(for: product.id)
+        }
+    }
+    
+    // 新增：添加单个变体到现有产品
+    func addVariantToProduct(productId: UUID, variant: VariantDetail) {
+        guard let index = products.firstIndex(where: { $0.id == productId }) else { return }
+        
+        products[index].addVariant(variant)
+        saveProducts()
+        addLog(for: products[index], status: .success, message: "已添加新变体: \(variant.name)")
+    }
+    
+    // 新增：移除产品的特定变体
+    func removeVariantFromProduct(productId: UUID, variantId: UUID) {
+        guard let index = products.firstIndex(where: { $0.id == productId }) else { return }
+        
+        let variantName = products[index].getVariant(by: variantId)?.name ?? "未知变体"
+        products[index].removeVariant(id: variantId)
+        saveProducts()
+        addLog(for: products[index], status: .success, message: "已移除变体: \(variantName)")
+    }
+    
+    // 新增：开始监控特定变体
+    func startMonitoringVariant(productId: String, variantId: String) {
+        guard let productUUID = UUID(uuidString: productId),
+              let variantUUID = UUID(uuidString: variantId),
+              let index = products.firstIndex(where: { $0.id == productUUID }) else { return }
+        var product = products[index]
+        guard var variant = product.getVariant(by: variantUUID) else { return }
+        
+        variant.isMonitoring = true
+        product.updateVariant(variant)
+        products[index] = product
+        saveProducts()
+        
+        // 立即检查该变体
+        checkVariantAvailability(product: product, variant: variant)
+        
+        // 为该变体设置独立定时器
+        let timerKey = "\(productId)_\(variantId)"
+        let timer = Timer.scheduledTimer(withTimeInterval: product.monitoringInterval, repeats: true) { _ in
+            if let currentProduct = self.products.first(where: { $0.id == productUUID }),
+               let currentVariant = currentProduct.getVariant(by: variantUUID) {
+                self.checkVariantAvailability(product: currentProduct, variant: currentVariant)
+            }
+        }
+        
+        variantTimers[timerKey] = timer
+        addLog(for: product, status: .success, message: "开始监控变体: \(variant.name)")
+    }
+    
+    // 新增：停止监控特定变体
+    func stopMonitoringVariant(productId: String, variantId: String) {
+        guard let productUUID = UUID(uuidString: productId),
+              let variantUUID = UUID(uuidString: variantId),
+              let index = products.firstIndex(where: { $0.id == productUUID }) else { return }
+        var product = products[index]
+        guard var variant = product.getVariant(by: variantUUID) else { return }
+        
+        variant.isMonitoring = false
+        product.updateVariant(variant)
+        products[index] = product
+        saveProducts()
+        
+        // 停止该变体的定时器
+        let timerKey = "\(productId)_\(variantId)"
+        variantTimers[timerKey]?.invalidate()
+        variantTimers.removeValue(forKey: timerKey)
+        
+        addLog(for: product, status: .success, message: "停止监控变体: \(variant.name)")
+    }
+    
+    func removeProduct(at index: Int) {
+        guard index < products.count else { return }
+        let product = products[index]
+        
+        // 停止该商品的监控
+        if product.isMonitoring {
+            stopMonitoring(for: product.id)
+        }
+        
+        products.remove(at: index)
+        saveProducts()
+        addLog(for: product, status: .success, message: "商品已从监控列表移除")
+    }
+    
+    func updateProduct(_ product: Product) {
+        if let index = products.firstIndex(where: { $0.id == product.id }) {
+            products[index] = product
+            saveProducts()
+        }
+    }
+    
+    func updateProductSettings(_ productId: UUID, interval: TimeInterval, autoStart: Bool, customUserAgent: String?) {
+        if let index = products.firstIndex(where: { $0.id == productId }) {
+            let wasMonitoring = products[index].isMonitoring
+            
+            products[index].monitoringInterval = interval
+            products[index].autoStart = autoStart
+            products[index].customUserAgent = customUserAgent
+            
+            // 如果正在监控且间隔改变，重启监控
+            if wasMonitoring {
+                stopMonitoring(for: productId)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.startMonitoring(for: productId)
+                }
+            }
+            
+            saveProducts()
+            addLog(for: products[index], status: .success, message: "监控设置已更新 - 间隔: \(Int(interval))秒")
+        }
+    }
+    
+    // MARK: - 独立监控控制
+    func startMonitoring(for productId: UUID) {
+        guard let index = products.firstIndex(where: { $0.id == productId }) else { return }
+        let product = products[index]
+        
+        guard !product.isMonitoring else { return }
+        
+        // 对于多变体产品，需要启动所有变体的监控
+        if product.variants.count > 1 {
+            for variant in product.variants {
+                if !variant.isMonitoring {
+                    startMonitoringVariant(productId: productId.uuidString, variantId: variant.id.uuidString)
+                }
+            }
+        } else {
+            // 对于单变体产品，启动第一个变体的监控
+            if let firstVariant = product.variants.first, !firstVariant.isMonitoring {
+                startMonitoringVariant(productId: productId.uuidString, variantId: firstVariant.id.uuidString)
+            }
+        }
+        
+        // 立即检查一次
+        checkProductAvailability(product)
+        
+        // 设置该产品的独立定时器
+        let timer = Timer.scheduledTimer(withTimeInterval: product.monitoringInterval, repeats: true) { _ in
+            self.checkProductAvailability(self.products.first(where: { $0.id == productId }) ?? product)
+        }
+        
+        productTimers[product.id] = timer
+        addLog(for: product, status: .success, message: "开始监控，间隔 \(Int(product.monitoringInterval)) 秒")
+    }
+    
+    func stopMonitoring(for productId: UUID) {
+        guard let index = products.firstIndex(where: { $0.id == productId }) else { return }
+        
+        let product = products[index]
+        
+        // 停止所有变体的监控
+        for variant in product.variants {
+            if variant.isMonitoring {
+                stopMonitoringVariant(productId: productId.uuidString, variantId: variant.id.uuidString)
+            }
+        }
+        
+        products[index] = product
+        saveProducts()
+        
+        // 停止该产品的定时器
+        productTimers[productId]?.invalidate()
+        productTimers.removeValue(forKey: productId)
+        
+        addLog(for: product, status: .success, message: "停止监控")
+    }
+    
+    func startAllMonitoring() {
+        for product in products {
+            if product.autoStart || !product.isMonitoring {
+                startMonitoring(for: product.id)
+            }
+        }
+    }
+    
+    func stopAllMonitoring() {
+        for product in products {
+            if product.isMonitoring {
+                stopMonitoring(for: product.id)
+            }
+        }
+    }
+    
+    func restoreMonitoringStates() {
+        // 恢复应用关闭前的监控状态
+        for product in products {
+            if product.isMonitoring {
+                // 重新开始监控
+                var updatedProduct = product
+                // 停止所有变体监控状态，然后重新启动
+                for i in 0..<updatedProduct.variants.count {
+                    updatedProduct.variants[i].isMonitoring = false
+                }
+                if let index = products.firstIndex(where: { $0.id == product.id }) {
+                    products[index] = updatedProduct
+                }
+                startMonitoring(for: product.id)
+            }
+        }
+    }
+    
+    // MARK: - 立即检查功能
+    func instantCheck(for productId: UUID) {
+        guard let product = products.first(where: { $0.id == productId }) else { return }
+        
+        addLog(for: product, status: .instantCheck, message: "执行立即检查...")
+        checkProductAvailability(product)
+    }
+    
+    func instantCheckAll() {
+        for product in products {
+            addLog(for: product, status: .instantCheck, message: "执行立即检查...")
+            // 添加小延迟避免同时发送太多请求
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0...2)) {
+                self.checkProductAvailability(product)
+            }
+        }
+    }
+    
+    // MARK: - 商品检查
+    private func checkProductAvailability(_ product: Product) {
+        guard let url = URL(string: product.url) else {
+            addLog(for: product, status: .error, message: "无效的URL")
+            return
+        }
+        
+        let startTime = Date()
+        let request = createAntiDetectionRequest(for: url, with: product)
+        
+        URLSession.shared.dataTaskPublisher(for: request)
+            .map { data, response -> (String, Int) in
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                return (String(data: data, encoding: .utf8) ?? "", statusCode)
+            }
+            .receive(on: DispatchQueue.main)
+            .sink(
+                receiveCompletion: { completion in
+                    let responseTime = Date().timeIntervalSince(startTime)
+                    switch completion {
+                    case .failure(let error):
+                        self.handleNetworkError(for: product, error: error, responseTime: responseTime)
+                    case .finished:
+                        break
+                    }
+                },
+                receiveValue: { htmlContent, statusCode in
+                    let responseTime = Date().timeIntervalSince(startTime)
+                    self.parseProductStatus(from: htmlContent, for: product, responseTime: responseTime, statusCode: statusCode)
+                }
+            )
+            .store(in: &cancellables)
+    }
+    
+    // 新增：检查特定变体的可用性
+    private func checkVariantAvailability(product: Product, variant: VariantDetail) {
+        guard let url = URL(string: variant.url) else {
+            addLog(for: product, status: .error, message: "变体URL无效: \(variant.name)")
+            return
+        }
+        
+        let startTime = Date()
+        let request = createAntiDetectionRequest(for: url, with: product)
+        
+        URLSession.shared.dataTaskPublisher(for: request)
+            .map { data, response -> (String, Int) in
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                return (String(data: data, encoding: .utf8) ?? "", statusCode)
+            }
+            .receive(on: DispatchQueue.main)
+            .sink(
+                receiveCompletion: { completion in
+                    let responseTime = Date().timeIntervalSince(startTime)
+                    switch completion {
+                    case .failure(let error):
+                        self.handleVariantNetworkError(for: product, variant: variant, error: error, responseTime: responseTime)
+                    case .finished:
+                        break
+                    }
+                },
+                receiveValue: { htmlContent, statusCode in
+                    let responseTime = Date().timeIntervalSince(startTime)
+                    self.parseVariantStatus(from: htmlContent, for: product, variant: variant, responseTime: responseTime, statusCode: statusCode)
+                }
+            )
+            .store(in: &cancellables)
+    }
+    
+    private func handleVariantNetworkError(for product: Product, variant: VariantDetail, error: Error, responseTime: TimeInterval) {
+        updateVariantStats(product: product, variantId: variant.id, incrementError: true)
+        
+        let errorMessage: String
+        let logStatus: LogStatus
+        
+        switch error {
+        case let urlError as URLError:
+            switch urlError.code {
+            case .timedOut:
+                errorMessage = "[\(variant.name)] 请求超时 - 可能触发了反爬虫机制"
+                logStatus = .antiBot
+            case .notConnectedToInternet:
+                errorMessage = "[\(variant.name)] 网络连接已断开"
+                logStatus = .networkError
+            default:
+                errorMessage = "[\(variant.name)] 网络错误: \(urlError.localizedDescription)"
+                logStatus = .networkError
+            }
+        default:
+            errorMessage = "[\(variant.name)] 未知错误: \(error.localizedDescription)"
+            logStatus = .error
+        }
+        
+        addLog(for: product, status: logStatus, message: errorMessage, responseTime: responseTime)
+        
+        // 如果该变体错误次数过多，停止监控
+        if let updatedVariant = getUpdatedVariant(product: product, variantId: variant.id),
+           updatedVariant.errorCount >= product.maxRetries && updatedVariant.isMonitoring {
+            stopMonitoringVariant(productId: product.id.uuidString, variantId: variant.id.uuidString)
+            addLog(for: product, status: .error, message: "[\(variant.name)] 错误次数过多，已自动暂停监控")
+        }
+    }
+    
+    private func parseVariantStatus(from html: String, for product: Product, variant: VariantDetail, responseTime: TimeInterval, statusCode: Int) {
+        updateVariantStats(product: product, variantId: variant.id, incrementError: false)
+        
+        // 检查是否被反爬虫检测
+        if statusCode == 403 || statusCode == 429 || html.contains("Access Denied") || html.contains("Cloudflare") {
+            addLog(for: product, status: .antiBot, message: "[\(variant.name)] 检测到反爬虫机制 (HTTP \(statusCode))", responseTime: responseTime, httpStatusCode: statusCode)
+            return
+        }
+        
+        // 检测关键词来判断变体状态
+        let unavailableKeywords = [
+            "out of stock", "sold out", "ausverkauft", "nicht verfügbar",
+            "temporarily unavailable", "vorübergehend nicht verfügbar",
+            "sorry, this item is currently out of stock", "leider ausverkauft"
+        ]
+        
+        let availableKeywords = [
+            "add to cart", "in den warenkorb", "buy now", "jetzt kaufen",
+            "verfügbar", "available", "add to bag", "in stock"
+        ]
+        
+        let htmlLowercase = html.lowercased()
+        
+        // 获取当前变体状态
+        guard let productIndex = products.firstIndex(where: { $0.id == product.id }),
+              var currentVariant = products[productIndex].getVariant(by: variant.id) else { return }
+        
+        let wasAvailable = currentVariant.isAvailable
+        
+        // 检查库存状态
+        let isOutOfStock = unavailableKeywords.contains { keyword in
+            htmlLowercase.contains(keyword)
+        }
+        
+        let hasStock = availableKeywords.contains { keyword in
+            htmlLowercase.contains(keyword)
+        }
+        
+        currentVariant.isAvailable = hasStock && !isOutOfStock
+        
+        // 更新变体信息
+        products[productIndex].updateVariant(currentVariant)
+        saveProducts()
+        
+        // 记录日志
+        let statusMessage = currentVariant.isAvailable ? "有库存" : "缺货"
+        let priceInfo = currentVariant.price != nil ? " (价格: \(currentVariant.price!))" : ""
+        
+        if wasAvailable != currentVariant.isAvailable {
+            let changeMessage = currentVariant.isAvailable ? "🎉 变体上架了！" : "变体已下架"
+            addLog(for: products[productIndex], status: .availabilityChanged, 
+                  message: "[\(variant.name)] \(changeMessage) - \(statusMessage)\(priceInfo)", 
+                  responseTime: responseTime, httpStatusCode: statusCode)
+            
+            // 如果变体从缺货变为有货，发送通知
+            if !wasAvailable && currentVariant.isAvailable {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("VariantAvailable"),
+                    object: ["product": products[productIndex], "variant": currentVariant]
+                )
+            }
+        } else {
+            addLog(for: products[productIndex], status: .success, 
+                  message: "[\(variant.name)] 状态检查: \(statusMessage)\(priceInfo)", 
+                  responseTime: responseTime, httpStatusCode: statusCode)
+        }
+    }
+    
+    // 新增：更新变体统计信息
+    private func updateVariantStats(product: Product, variantId: UUID, incrementError: Bool) {
+        guard let productIndex = products.firstIndex(where: { $0.id == product.id }),
+              var variant = products[productIndex].getVariant(by: variantId) else { return }
+        
+        variant.incrementCheck()
+        if incrementError {
+            variant.incrementError()
+        } else {
+            variant.incrementSuccess()
+        }
+        
+        products[productIndex].updateVariant(variant)
+        saveProducts()
+    }
+    
+    // 新增：获取更新后的变体
+    private func getUpdatedVariant(product: Product, variantId: UUID) -> VariantDetail? {
+        guard let currentProduct = products.first(where: { $0.id == product.id }) else { return nil }
+        return currentProduct.getVariant(by: variantId)
+    }
+    
+    private func handleNetworkError(for product: Product, error: Error, responseTime: TimeInterval) {
+        updateProductStats(product, incrementError: true)
+        
+        let errorMessage: String
+        let logStatus: LogStatus
+        
+        switch error {
+        case let urlError as URLError:
+            switch urlError.code {
+            case .timedOut:
+                errorMessage = "请求超时 - 可能触发了反爬虫机制"
+                logStatus = .antiBot
+            case .notConnectedToInternet:
+                errorMessage = "网络连接已断开"
+                logStatus = .networkError
+            default:
+                errorMessage = "网络错误: \(urlError.localizedDescription)"
+                logStatus = .networkError
+            }
+        case let nsError as NSError:
+            if nsError.domain == NSURLErrorDomain && (nsError.code == 403 || nsError.code == 429) {
+                errorMessage = "访问被拒绝 - 触发反爬虫检测"
+                logStatus = .antiBot
+            } else {
+                errorMessage = "错误: \(nsError.localizedDescription)"
+                logStatus = .error
+            }
+        default:
+            errorMessage = "未知错误: \(error.localizedDescription)"
+            logStatus = .error
+        }
+        
+        addLog(for: product, status: logStatus, message: errorMessage, responseTime: responseTime)
+        
+        if product.errorCount >= product.maxRetries && product.isMonitoring {
+            stopMonitoring(for: product.id)
+            addLog(for: product, status: .error, message: "错误次数过多，已自动暂停监控")
+        }
+    }
+    
+    private func parseProductStatus(from html: String, for product: Product, responseTime: TimeInterval, statusCode: Int) {
+        updateProductStats(product, incrementError: false)
+        
+        // 检查是否被反爬虫检测
+        if statusCode == 403 || statusCode == 429 || html.contains("Access Denied") || html.contains("Cloudflare") {
+            addLog(for: product, status: .antiBot, message: "检测到反爬虫机制 (HTTP \(statusCode))", responseTime: responseTime, httpStatusCode: statusCode)
+            return
+        }
+        
+        // 使用增强的解析逻辑
+        let parseResult = parseProductStatus(from: html, url: product.url)
+        
+        guard let productIndex = products.firstIndex(where: { $0.id == product.id }) else { return }
+        var currentProduct = products[productIndex]
+        
+        // 记录解析结果的详细信息
+        var debugInfo: [String] = []
+        debugInfo.append("解析结果:")
+        debugInfo.append("- 商品名称: \(parseResult.name ?? "未检测到")")
+        debugInfo.append("- 价格: \(parseResult.price ?? "未检测到")")
+        debugInfo.append("- 图片URL: \(parseResult.imageURL != nil ? "已检测到" : "未检测到")")
+        debugInfo.append("- 变体数量: \(parseResult.variants.count)")
+        debugInfo.append("- 库存状态: \(parseResult.isAvailable ? "有货" : "缺货")")
+        
+        // 更新商品信息
+        if parseResult.name != "未知商品" && parseResult.name != currentProduct.name {
+            currentProduct.name = parseResult.name!
+        }
+        
+        // 对于单变体产品，更新第一个变体的状态
+        if let firstVariantIndex = currentProduct.variants.indices.first {
+            let wasAvailable = currentProduct.variants[firstVariantIndex].isAvailable
+            var variant = currentProduct.variants[firstVariantIndex]
+            
+            // 更新变体信息
+            variant.isAvailable = parseResult.isAvailable
+            if let price = parseResult.price {
+                variant.price = price
+            }
+            if let imageURL = parseResult.imageURL {
+                variant.imageURL = imageURL
+            }
+            
+            currentProduct.variants[firstVariantIndex] = variant
+            
+            // 保存更新
+            products[productIndex] = currentProduct
+            saveProducts()
+            
+            // 准备日志消息
+            let statusMessage = variant.isAvailable ? "有库存" : "缺货"
+            let priceInfo = variant.price != nil ? " (价格: \(variant.price!))" : ""
+            let nameInfo = parseResult.name != "未知商品" ? " - \(parseResult.name!)" : ""
+            
+            if wasAvailable != variant.isAvailable {
+                let changeMessage = variant.isAvailable ? "🎉 商品上架了！" : "📦 商品已下架"
+                addLog(for: currentProduct, status: .availabilityChanged, 
+                      message: "\(changeMessage)\(nameInfo) - \(statusMessage)\(priceInfo)", 
+                      responseTime: responseTime, httpStatusCode: statusCode)
+                
+                // 如果商品从缺货变为有货，发送通知
+                if !wasAvailable && variant.isAvailable {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("ProductAvailable"),
+                        object: currentProduct
+                    )
+                }
+            } else {
+                addLog(for: currentProduct, status: .success, 
+                      message: "✅ 状态检查\(nameInfo): \(statusMessage)\(priceInfo)", 
+                      responseTime: responseTime, httpStatusCode: statusCode)
+            }
+            
+            // 添加调试信息到日志
+            if currentProduct.enableDebugLogging {
+                addLog(for: currentProduct, status: .info, 
+                      message: debugInfo.joined(separator: "\n"), 
+                      responseTime: responseTime)
+            }
+        }
+    }
+    
+    // MARK: - 多模式商品名称提取
+    private func extractProductName(from html: String) -> String? {
+        let patterns = [
+            // JSON-LD结构化数据（优先）
+            "\"name\"\\s*:\\s*\"([^\"]+)\"",
+            // Meta标签
+            "<meta[^>]*property=[\"']og:title[\"'][^>]*content=[\"']([^\"']+)[\"']",
+            "<meta[^>]*name=[\"']title[\"'][^>]*content=[\"']([^\"']+)[\"']",
+            // HTML标题标签
+            "<title[^>]*>([^<]+)</title>",
+            "<h1[^>]*>([^<]+)</h1>",
+            "<h2[^>]*class=[\"'][^\"']*product[^\"']*[\"'][^>]*>([^<]+)</h2>",
+            // 特定于Popmart的选择器
+            "<div[^>]*class=[\"'][^\"']*product-title[^\"']*[\"'][^>]*>([^<]+)</div>",
+            "<span[^>]*class=[\"'][^\"']*product-name[^\"']*[\"'][^>]*>([^<]+)</span>",
+            // 通用商品名称类
+            "<[^>]*class=[\"'][^\"']*product[_-]?name[^\"']*[\"'][^>]*>([^<]+)<",
+            "<[^>]*class=[\"'][^\"']*title[^\"']*[\"'][^>]*>([^<]+)<"
+        ]
+        
+        for pattern in patterns {
+            if let name = extractFirst(pattern: pattern, from: html) {
+                let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                if !cleaned.isEmpty && cleaned.count > 2 {
+                    return cleaned
+                }
+            }
+        }
+        return nil
+    }
+    
+    // MARK: - 多币种价格提取
+    private func extractPrice(from html: String) -> String? {
+        let patterns = [
+            // JSON-LD价格
+            "\"price\"\\s*:\\s*\"?([0-9,\\.]+)\"?",
+            "\"offers\"[^}]*\"price\"\\s*:\\s*\"?([0-9,\\.]+)\"?",
+            // 各种币种格式
+            "([€¥$£₩])\\s*([0-9,\\.]+)",
+            "([0-9,\\.]+)\\s*([€¥$£₩])",
+            // 价格类名
+            "<[^>]*class=[\"'][^\"']*price[^\"']*[\"'][^>]*>([^<]*[0-9,\\.]+[^<]*)<",
+            "<[^>]*class=[\"'][^\"']*cost[^\"']*[\"'][^>]*>([^<]*[0-9,\\.]+[^<]*)<",
+            "<[^>]*class=[\"'][^\"']*amount[^\"']*[\"'][^>]*>([^<]*[0-9,\\.]+[^<]*)<",
+            // data属性
+            "data-price=[\"']([^\"']+)[\"']",
+            "data-cost=[\"']([^\"']+)[\"']"
+        ]
+        
+        for pattern in patterns {
+            if let priceMatch = extractFirst(pattern: pattern, from: html) {
+                let cleaned = priceMatch.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleaned.isEmpty {
+                    return cleaned
+                }
+            }
+        }
+        return nil
+    }
+    
+    // MARK: - 多源图片提取
+    private func extractMainImage(from html: String, baseURL: String) -> String? {
+        let patterns = [
+            // Open Graph图片（优先）
+            "<meta[^>]*property=[\"']og:image[\"'][^>]*content=[\"']([^\"']+)[\"']",
+            // JSON-LD图片
+            "\"image\"\\s*:\\s*\"([^\"]+)\"",
+            // 主商品图片
+            "<img[^>]*class=[\"'][^\"']*product[^\"']*main[^\"']*[\"'][^>]*src=[\"']([^\"']+)[\"']",
+            "<img[^>]*class=[\"'][^\"']*main[^\"']*product[^\"']*[\"'][^>]*src=[\"']([^\"']+)[\"']",
+            // 通用产品图片
+            "<img[^>]*class=[\"'][^\"']*product[_-]?image[^\"']*[\"'][^>]*src=[\"']([^\"']+)[\"']",
+            "<img[^>]*alt=[\"'][^\"']*product[^\"']*[\"'][^>]*src=[\"']([^\"']+)[\"']"
+        ]
+        
+        for pattern in patterns {
+            if let imageURL = extractFirst(pattern: pattern, from: html) {
+                let cleaned = imageURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleaned.isEmpty {
+                    // 处理相对URL
+                    if cleaned.hasPrefix("//") {
+                        return "https:" + cleaned
+                    } else if cleaned.hasPrefix("/") {
+                        if let baseURLObj = URL(string: baseURL) {
+                            return baseURLObj.scheme! + "://" + baseURLObj.host! + cleaned
+                        }
+                    } else if !cleaned.hasPrefix("http") {
+                        if let baseURLObj = URL(string: baseURL) {
+                            return baseURLObj.scheme! + "://" + baseURLObj.host! + "/" + cleaned
+                        }
+                    }
+                    return cleaned
+                }
+            }
+        }
+        return nil
+    }
+    
+    // MARK: - 变体信息提取
+    private func extractVariants(from html: String, productURL: String) -> [VariantDetail] {
+        var variants: [VariantDetail] = []
+        
+        // 1. 尝试提取JSON中的变体信息
+        if let jsonVariants = extractJSONVariants(from: html, productURL: productURL) {
+            variants.append(contentsOf: jsonVariants)
+        }
+        
+        // 2. 如果没有JSON变体，尝试HTML变体提取
+        if variants.isEmpty {
+            if let htmlVariants = extractHTMLVariants(from: html, productURL: productURL) {
+                variants.append(contentsOf: htmlVariants)
+            }
+        }
+        
+        // 3. 如果仍然没有变体，创建默认变体
+        if variants.isEmpty {
+            let defaultVariant = VariantDetail(
+                id: UUID(),
+                variant: .color("默认"),
+                name: "默认变体",
+                price: extractPrice(from: html),
+                isAvailable: determineAvailability(from: html),
+                url: productURL,
+                imageURL: extractMainImage(from: html, baseURL: productURL),
+                sku: nil,
+                stockLevel: nil,
+                isMonitoring: false,
+                lastChecked: Date(),
+                totalChecks: 0,
+                successfulChecks: 0,
+                errorCount: 0
+            )
+            variants.append(defaultVariant)
+        }
+        
+        return variants
+    }
+    
+    // MARK: - JSON变体提取
+    private func extractJSONVariants(from html: String, productURL: String) -> [VariantDetail]? {
+        let jsonPatterns = [
+            "\"variants\"\\s*:\\s*(\\[.*?\\])",
+            "\"options\"\\s*:\\s*(\\[.*?\\])",
+            "window\\.productData\\s*=\\s*(\\{.*?\\});",
+            "<script[^>]*type=[\"']application/ld\\+json[\"'][^>]*>(.*?)</script>"
+        ]
+        
+        for pattern in jsonPatterns {
+            if let jsonString = extractFirst(pattern: pattern, from: html) {
+                if let variants = parseJSONVariants(jsonString, productURL: productURL) {
+                    return variants
+                }
+            }
+        }
+        return nil
+    }
+    
+    // MARK: - HTML变体提取
+    private func extractHTMLVariants(from html: String, productURL: String) -> [VariantDetail]? {
+        var variants: [VariantDetail] = []
+        
+        // 提取颜色/尺码选项
+        let optionPatterns = [
+            "<option[^>]*value=[\"']([^\"']+)[\"'][^>]*>([^<]+)</option>",
+            "<button[^>]*data-variant=[\"']([^\"']+)[\"'][^>]*>([^<]+)</button>",
+            "<div[^>]*class=[\"'][^\"']*variant[^\"']*[\"'][^>]*data-value=[\"']([^\"']+)[\"'][^>]*>([^<]+)</div>"
+        ]
+        
+        for pattern in optionPatterns {
+            let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+            let nsString = html as NSString
+            let results = regex?.matches(in: html, options: [], range: NSRange(location: 0, length: nsString.length))
+            
+            results?.forEach { match in
+                if match.numberOfRanges >= 3 {
+                    let value = nsString.substring(with: match.range(at: 1))
+                    let name = nsString.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    if !name.isEmpty {
+                        let variant = VariantDetail(
+                            id: UUID(),
+                            variant: .color(name),
+                            name: name,
+                            price: extractPrice(from: html),
+                            isAvailable: determineAvailability(from: html),
+                            url: productURL,
+                            imageURL: extractMainImage(from: html, baseURL: productURL),
+                            sku: value,
+                            stockLevel: nil,
+                            isMonitoring: false,
+                            lastChecked: Date(),
+                            totalChecks: 0,
+                            successfulChecks: 0,
+                            errorCount: 0
+                        )
+                        variants.append(variant)
+                    }
+                }
+            }
+        }
+        
+        return variants.isEmpty ? nil : variants
+    }
+    
+    // MARK: - 多信号库存状态判断
+    private func determineAvailability(from html: String) -> Bool {
+        let unavailablePatterns = [
+            // 多语言缺货关键词
+            "out.of.stock", "sold.out", "not.available", "unavailable",
+            "ausverkauft", "nicht.verfügbar", "épuisé", "non.disponible",
+            "agotado", "no.disponible", "esaurito", "non.disponibile",
+            "缺货", "售完", "无库存", "已售完", "品切れ", "재고없음",
+            // 按钮状态
+            "disabled", "button.*disabled", "btn.*disabled",
+            // CSS类名
+            "out-of-stock", "sold-out", "not-available", "unavailable",
+            // 具体文本
+            "Add to Cart.*disabled", "加入购物车.*disabled", "立即购买.*disabled"
+        ]
+        
+        // 检查是否包含缺货信号
+        for pattern in unavailablePatterns {
+            let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+            if regex?.firstMatch(in: html, options: [], range: NSRange(location: 0, length: html.count)) != nil {
+                return false
+            }
+        }
+        
+        // 检查有货信号
+        let availablePatterns = [
+            "in.stock", "available", "add.to.cart", "buy.now",
+            "verfügbar", "hinzufügen", "kaufen", "disponible", "ajouter",
+            "disponible", "comprar", "disponibile", "acquista",
+            "有库存", "现货", "立即购买", "加入购物车", "在庫あり", "재고있음"
+        ]
+        
+        for pattern in availablePatterns {
+            let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+            if regex?.firstMatch(in: html, options: [], range: NSRange(location: 0, length: html.count)) != nil {
+                return true
+            }
+        }
+        
+        // 默认假设有货（保守策略）
+        return true
+    }
+    
+    // MARK: - 辅助方法
+    private func extractFirst(pattern: String, from html: String) -> String? {
+        let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators])
+        let nsString = html as NSString
+        if let match = regex?.firstMatch(in: html, options: [], range: NSRange(location: 0, length: nsString.length)) {
+            if match.numberOfRanges >= 2 {
+                return nsString.substring(with: match.range(at: 1))
+            }
+        }
+        return nil
+    }
+    
+    private func parseJSONVariants(_ jsonString: String, productURL: String) -> [VariantDetail]? {
+        // 简化的JSON解析，实际项目中应使用更健壮的JSON解析
+        // 这里可以使用JSONSerialization或Codable进行解析
+        return nil
+    }
+}
+
+// 通用价格提取方法
+private func extractPrice(from html: String) -> String? {
+    let pricePatterns = [
+        #"€\s*(\d+[.,]\d{2})"#,
+        #"EUR\s*(\d+[.,]\d{2})"#,
+        #"(\d+[.,]\d{2})\s*€"#,
+        #"(\d+[.,]\d{2})\s*EUR"#,
+        #"price[^>]*>.*?€\s*(\d+[.,]\d{2})"#,
+        #"class="[^"]*price[^"]*"[^>]*>.*?(\d+[.,]\d{2})"#
+    ]
+    
+    for pattern in pricePatterns {
+        if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            let range = NSRange(location: 0, length: html.count)
+            if let match = regex.firstMatch(in: html, options: [], range: range) {
+                if let priceRange = Range(match.range(at: 1), in: html) {
+                    let priceString = String(html[priceRange])
+                        .replacingOccurrences(of: ",", with: ".")
+                    return "€\(priceString)"
+                }
+            }
+        }
+    }
+    
+    return nil
+}
+
+// 提取商品名称
+private func extractProductName(from html: String) -> String? {
+    let namePatterns = [
+        #"<h1[^>]*class="[^"]*product[^"]*title[^"]*"[^>]*>(.*?)</h1>"#,
+        #"<h1[^>]*>(.*?)</h1>"#,
+        #"<meta[^>]*property="og:title"[^>]*content="([^"]+)""#,
+        #"<title>(.*?)</title>"#
+    ]
+    
+    for pattern in namePatterns {
+        if let range = html.range(of: pattern, options: [.regularExpression, .caseInsensitive]) {
+            let match = String(html[range])
+            let cleanedName = match.replacingOccurrences(of: #"<[^>]*>"#, with: "", options: [.regularExpression])
+                .replacingOccurrences(of: #"content="|""#, with: "", options: [.regularExpression])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if !cleanedName.isEmpty {
+                return cleanedName
+            }
+        }
+    }
+    
+    return nil
+}
+
+// 将SKU映射到变体类型
+private func mapSkuToVariant(sku: String, title: String) -> ProductVariant {
+    let lowercaseSku = sku.lowercased()
+    let lowercaseTitle = title.lowercased()
+    
+    if lowercaseSku.contains("set") || lowercaseTitle.contains("整套") || lowercaseTitle.contains("set") {
+        return .wholeSet
+    } else if lowercaseSku.contains("random") || lowercaseTitle.contains("随机") || lowercaseTitle.contains("random") {
+        return .random
+    } else if lowercaseSku.contains("limited") || lowercaseTitle.contains("限定") || lowercaseTitle.contains("limited") {
+        return .limited
+    } else if lowercaseSku.contains("specific") || lowercaseTitle.contains("指定") || lowercaseTitle.contains("specific") {
+        return .specific
+    } else {
+        return .singleBox
+    }
+}
+
+// MARK: - 增强版解析方法 - 仅保留核心解析逻辑，用作辅助功能
+
