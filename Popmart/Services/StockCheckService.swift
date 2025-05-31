@@ -1,6 +1,29 @@
 import Foundation
 import Network
 
+// MARK: - Cloud Run API响应模型
+struct CloudRunStockResponse: Codable {
+    let success: Bool
+    let productId: String?
+    let productName: String?
+    let price: String?
+    let inStock: Bool?
+    let stockStatus: String?
+    let stockReason: String?
+    let url: String?
+    let currentUrl: String?
+    let timestamp: String?
+    let debug: CloudRunDebugInfo?
+    let error: String?
+    let message: String?
+}
+
+struct CloudRunDebugInfo: Codable {
+    let buttonText: String?
+    let isButtonDisabled: Bool?
+}
+
+// MARK: - 兼容旧格式的数据模型
 struct StockCheckResponse: Codable {
     let success: Bool
     let data: StockData?
@@ -73,9 +96,9 @@ class StockCheckService: ObservableObject {
     private let queue = DispatchQueue(label: "NetworkMonitor")
     @Published var isConnected = true
     
-    // 动态获取后端URL
+    // 更新为Google Cloud Run URL
     private var baseURL: String {
-        return UserDefaults.standard.string(forKey: "backendURL") ?? "https://popmart-stock-checker-aiu9amdzm-nion119-gmailcoms-projects.vercel.app"
+        return UserDefaults.standard.string(forKey: "backendURL") ?? "https://popmart-full-215643545724.asia-northeast1.run.app"
     }
     
     init() {
@@ -102,71 +125,28 @@ class StockCheckService: ObservableObject {
             self.errorMessage = nil
         }
         
-        // 首先尝试主要的API（使用Puppeteer）
-        checkStockWithPuppeteer(productId: productId) { [weak self] result in
-            switch result {
-            case .success(let data):
-                completion(.success(data))
-            case .failure(_):
-                // 如果主要API失败，尝试简单API
-                print("主要API失败，尝试简单API...")
-                self?.checkStockSimple(productId: productId, completion: completion)
-            }
-        }
+        // 使用新的Google Cloud Run API
+        checkStockWithCloudRun(productId: productId, completion: completion)
     }
     
-    private func checkStockWithPuppeteer(productId: String, completion: @escaping (Result<StockData, Error>) -> Void) {
+    // 新的Cloud Run API调用方法
+    private func checkStockWithCloudRun(productId: String, completion: @escaping (Result<StockData, Error>) -> Void) {
         guard let url = URL(string: "\(baseURL)/api/check-stock?productId=\(productId)") else {
+            DispatchQueue.main.async {
+                self.isLoading = false
+                self.errorMessage = "无效的URL"
+            }
             completion(.failure(NetworkError.invalidURL))
             return
         }
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 45.0
+        request.timeoutInterval = 60.0 // Cloud Run需要更长时间
         request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
         
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-            
-            guard let data = data else {
-                completion(.failure(NetworkError.noData))
-                return
-            }
-            
-            do {
-                let response = try JSONDecoder().decode(StockCheckResponse.self, from: data)
-                
-                if response.success, let stockData = response.data {
-                    DispatchQueue.main.async {
-                        self?.lastCheckResult = stockData
-                        self?.errorMessage = nil
-                        self?.isLoading = false
-                    }
-                    completion(.success(stockData))
-                } else {
-                    let errorMsg = response.error ?? "未知错误"
-                    completion(.failure(NetworkError.apiError(errorMsg)))
-                }
-            } catch {
-                completion(.failure(error))
-            }
-        }.resume()
-    }
-    
-    private func checkStockSimple(productId: String, completion: @escaping (Result<StockData, Error>) -> Void) {
-        guard let url = URL(string: "\(baseURL)/api/check-stock-simple?productId=\(productId)") else {
-            completion(.failure(NetworkError.invalidURL))
-            return
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 30.0
-        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        print("🚀 正在调用Cloud Run API: \(url.absoluteString)")
         
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             DispatchQueue.main.async {
@@ -177,38 +157,80 @@ class StockCheckService: ObservableObject {
                 DispatchQueue.main.async {
                     self?.errorMessage = "网络请求失败: \(error.localizedDescription)"
                 }
+                print("❌ 网络错误: \(error.localizedDescription)")
                 completion(.failure(error))
                 return
             }
             
             guard let data = data else {
+                DispatchQueue.main.async {
+                    self?.errorMessage = "没有收到数据"
+                }
                 completion(.failure(NetworkError.noData))
                 return
             }
             
+            // 打印原始响应用于调试
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("📦 API响应: \(responseString)")
+            }
+            
             do {
-                let response = try JSONDecoder().decode(StockCheckResponse.self, from: data)
+                // 尝试解析新的Cloud Run API响应格式
+                let cloudRunResponse = try JSONDecoder().decode(CloudRunStockResponse.self, from: data)
                 
-                if response.success, let stockData = response.data {
+                if cloudRunResponse.success {
+                    // 转换为旧格式以保持兼容性
+                    let stockData = StockData(
+                        productId: cloudRunResponse.productId ?? productId,
+                        productName: cloudRunResponse.productName ?? "未知产品",
+                        inStock: cloudRunResponse.inStock ?? false,
+                        stockReason: cloudRunResponse.stockReason ?? "无法确定库存状态",
+                        price: cloudRunResponse.price ?? "价格未知",
+                        url: cloudRunResponse.url ?? "",
+                        timestamp: cloudRunResponse.timestamp ?? ISO8601DateFormatter().string(from: Date()),
+                        debug: DebugInfo(
+                            hasAddToCartButton: cloudRunResponse.debug?.buttonText?.contains("add") ?? false,
+                            hasDisabledButton: cloudRunResponse.debug?.isButtonDisabled ?? false,
+                            hasSoldOutText: cloudRunResponse.stockReason?.contains("缺货") ?? false,
+                            buttonText: cloudRunResponse.debug?.buttonText ?? "",
+                            pageContentSample: nil
+                        )
+                    )
+                    
                     DispatchQueue.main.async {
                         self?.lastCheckResult = stockData
                         self?.errorMessage = nil
                     }
+                    print("✅ 库存检查成功: \(stockData.productName) - \(stockData.inStock ? "有货" : "缺货")")
                     completion(.success(stockData))
                 } else {
-                    let errorMsg = response.error ?? "未知错误"
+                    let errorMsg = cloudRunResponse.error ?? cloudRunResponse.message ?? "未知错误"
                     DispatchQueue.main.async {
                         self?.errorMessage = errorMsg
                     }
+                    print("❌ API返回错误: \(errorMsg)")
                     completion(.failure(NetworkError.apiError(errorMsg)))
                 }
             } catch {
                 DispatchQueue.main.async {
                     self?.errorMessage = "数据解析失败: \(error.localizedDescription)"
                 }
+                print("❌ 解析错误: \(error.localizedDescription)")
                 completion(.failure(error))
             }
         }.resume()
+    }
+    
+    // 保留旧方法以兼容现有代码
+    private func checkStockWithPuppeteer(productId: String, completion: @escaping (Result<StockData, Error>) -> Void) {
+        // 重定向到新的Cloud Run方法
+        checkStockWithCloudRun(productId: productId, completion: completion)
+    }
+    
+    private func checkStockSimple(productId: String, completion: @escaping (Result<StockData, Error>) -> Void) {
+        // 重定向到新的Cloud Run方法
+        checkStockWithCloudRun(productId: productId, completion: completion)
     }
     
     func checkStockForURL(_ urlString: String) async throws -> StockResult {
@@ -216,29 +238,21 @@ class StockCheckService: ObservableObject {
             throw StockCheckError.invalidURL
         }
         
-        // 优先尝试Puppeteer API（支持JavaScript）
-        do {
-            let puppeteerResult = try await checkWithPuppeteerAPI(encodedURL)
-            print("✅ Puppeteer API成功获取库存信息")
-            return puppeteerResult
-        } catch {
-            print("⚠️ Puppeteer API失败: \(error.localizedDescription)")
-            print("🔄 回退到简单API...")
-            
-            // 如果Puppeteer失败，使用简单API作为后备
-            return try await checkWithSimpleAPI(encodedURL)
-        }
+        return try await checkWithCloudRunAPI(encodedURL)
     }
     
-    private func checkWithPuppeteerAPI(_ encodedURL: String) async throws -> StockResult {
-        guard let url = URL(string: "\(baseURL)/api/check-stock-puppeteer?url=\(encodedURL)") else {
+    private func checkWithCloudRunAPI(_ encodedURL: String) async throws -> StockResult {
+        guard let url = URL(string: "\(baseURL)/api/check-stock?url=\(encodedURL)") else {
             throw StockCheckError.invalidURL
         }
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 45.0 // Puppeteer需要更长时间
+        request.timeoutInterval = 60.0
         request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        
+        print("🚀 正在调用Cloud Run URL API: \(url.absoluteString)")
         
         let (data, response) = try await URLSession.shared.data(for: request)
         
@@ -250,42 +264,31 @@ class StockCheckService: ObservableObject {
             throw StockCheckError.serverError("HTTP \(httpResponse.statusCode)")
         }
         
-        let apiResponse = try JSONDecoder().decode(APIResponse.self, from: data)
+        let cloudRunResponse = try JSONDecoder().decode(CloudRunStockResponse.self, from: data)
         
-        guard apiResponse.success else {
-            throw StockCheckError.serverError(apiResponse.error ?? "Unknown error")
+        guard cloudRunResponse.success else {
+            throw StockCheckError.serverError(cloudRunResponse.error ?? cloudRunResponse.message ?? "Unknown error")
         }
         
-        return apiResponse.data
+        // 转换为StockResult格式
+        return StockResult(
+            productId: cloudRunResponse.productId ?? "unknown",
+            productName: cloudRunResponse.productName ?? "未知产品",
+            inStock: cloudRunResponse.inStock ?? false,
+            stockReason: cloudRunResponse.stockReason ?? "无法确定库存状态",
+            price: cloudRunResponse.price ?? "价格未知",
+            url: cloudRunResponse.url ?? "",
+            timestamp: cloudRunResponse.timestamp ?? ISO8601DateFormatter().string(from: Date())
+        )
+    }
+    
+    // 保留旧方法以兼容现有代码
+    private func checkWithPuppeteerAPI(_ encodedURL: String) async throws -> StockResult {
+        return try await checkWithCloudRunAPI(encodedURL)
     }
     
     private func checkWithSimpleAPI(_ encodedURL: String) async throws -> StockResult {
-        guard let url = URL(string: "\(baseURL)/api/check-stock-simple?url=\(encodedURL)") else {
-            throw StockCheckError.invalidURL
-        }
-        
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.timeoutInterval = 30.0
-        request.addValue("application/json", forHTTPHeaderField: "Accept")
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw StockCheckError.networkError("Invalid response")
-        }
-        
-        guard httpResponse.statusCode == 200 else {
-            throw StockCheckError.serverError("HTTP \(httpResponse.statusCode)")
-        }
-        
-        let apiResponse = try JSONDecoder().decode(APIResponse.self, from: data)
-        
-        guard apiResponse.success else {
-            throw StockCheckError.serverError(apiResponse.error ?? "Unknown error")
-        }
-        
-        return apiResponse.data
+        return try await checkWithCloudRunAPI(encodedURL)
     }
     
     deinit {

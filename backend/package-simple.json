@@ -2,15 +2,14 @@
   "name": "popmart-stock-checker",
   "version": "1.0.0",
   "description": "Popmart stock checker backend service",
-  "main": "api/server-simple.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node api/server-simple.js",
-    "dev": "node api/server-simple.js"
+    "start": "node api/server.js",
+    "dev": "node api/server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "puppeteer": "^21.6.1"
+    "cors": "^2.8.5"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -1,0 +1,29 @@
+FROM node:18-alpine
+
+# 安装基础依赖
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    ca-certificates
+
+# 设置环境变量
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+ENV NODE_ENV=production
+ENV PORT=8080
+
+WORKDIR /app
+
+# 复制并安装依赖
+COPY package*.json ./
+RUN npm ci --only=production
+
+# 复制源代码
+COPY . .
+
+EXPOSE 8080
+
+# 使用 node 用户运行
+USER node
+
+CMD ["npm", "start"] 

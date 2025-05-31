@@ -33,7 +33,8 @@
 ### 步骤3：测试部署
 ```bash
 # 您的免费URL将类似于：
-# https://popmart-stock-checker.onrender.com
+# https://popmart-stock-checker.onrender.com   
+https://popmart-stock-checker.onrender.com
 
 # 测试API
 curl https://popmart-stock-checker.onrender.com/api/test
@@ -155,3 +156,40 @@ private var baseURL: String {
 - Render文档：https://render.com/docs
 - Railway文档：https://docs.railway.app
 - 我的建议：先试Render，99%情况下都能完美工作！ 
+
+## 🎯 下一步行动
+
+现在所有文件都已准备就绪！您有两个选择：
+
+### 🚀 立即开始部署：
+
+1. **安装 Google Cloud CLI**：
+```bash
+brew install google-cloud-sdk
+```
+
+2. **创建 Google Cloud 项目**：
+   - 访问 [console.cloud.google.com](https://console.cloud.google.com)
+   - 创建新项目，记下项目ID
+
+3. **运行我为您准备的自动化脚本**：
+```bash
+./deploy-gcp.sh YOUR_PROJECT_ID
+```
+
+### 📚 详细步骤
+
+所有详细说明都在 `GOOGLE_CLOUD_DEPLOY.md` 文件中，包括：
+- ✅ 完整的安装和配置步骤
+- ✅ 成本分析（基本上完全免费）
+- ✅ 故障排除指南
+- ✅ 性能优化建议
+
+### 🔥 为什么选择 Google Cloud Run 很棒：
+
+1. **免费额度超大**：200万请求/月，您的个人项目基本用不完
+2. **冷启动优化**：我已经在Dockerfile中做了优化，启动速度很快
+3. **自动扩缩容**：没流量时完全不收费，有流量时自动扩展
+4. **企业级稳定性**：Google的基础设施，99.9%的可用性
+
+您想先试试本地构建Docker镜像，还是直接开始部署到Google Cloud？我可以继续协助您！ 

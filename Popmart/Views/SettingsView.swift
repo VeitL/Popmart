@@ -8,13 +8,13 @@ struct SettingsView: View {
     @State private var testURL = "https://www.popmart.com/de/products/1707/THE-MONSTERS-Let's-Checkmate-Series-Vinyl-Plush-Doll"
     @State private var testResult = ""
     @State private var isTestingURL = false
-    @State private var backendURL = "https://popmart-stock-checker-aiu9amdzm-nion119-gmailcoms-projects.vercel.app"
+    @State private var backendURL = "https://popmart-full-215643545724.asia-northeast1.run.app"
     
     var body: some View {
         NavigationView {
             Form {
                 // 后端服务配置
-                Section(header: Text("🔧 后端服务配置").font(.headline)) {
+                Section(header: Text("🔧 后端服务配置 (Google Cloud Run)").font(.headline)) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("后端服务URL:")
                             .font(.caption)
@@ -24,6 +24,20 @@ struct SettingsView: View {
                             .textFieldStyle(RoundedBorderTextFieldStyle())
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
+                        
+                        // 显示当前配置信息
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("✅ 当前配置: Google Cloud Run")
+                                .font(.caption)
+                                .foregroundColor(.green)
+                            Text("🌏 地区: 亚洲东北部 (asia-northeast1)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text("⚡ 特性: Puppeteer支持, 自动扩缩容")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
                         
                         Button("保存配置") {
                             // 更新服务配置
@@ -358,18 +372,28 @@ struct SettingsView: View {
         isTestingURL = true
         testResult = "正在调用后端API..."
         
-        // 直接使用简单API测试，避免Puppeteer问题
+        // 使用更合适的URL编码，只编码查询参数值
         guard let encodedURL = testURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "\(backendURL)/api/check-stock-simple?url=\(encodedURL)") else {
-            testResult = "❌ 无效的URL格式"
+              let url = URL(string: "\(backendURL)/api/check-stock?url=\(encodedURL)") else {
+            testResult = """
+            ❌ 无效的URL格式
+            
+            🔍 调试信息：
+            • 后端URL: \(backendURL)
+            • 测试URL: \(testURL)
+            • 编码后URL: \(testURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "编码失败")
+            """
             isTestingURL = false
             return
         }
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 30.0
+        request.timeoutInterval = 90.0  // 增加到90秒，因为后端Puppeteer现在需要更多时间进行详细检测
         request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15", forHTTPHeaderField: "User-Agent")
+        
+        print("🚀 正在调用API: \(url.absoluteString)")
         
         URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
@@ -391,26 +415,45 @@ struct SettingsView: View {
                     1. 验证后端服务URL是否正确
                     2. 检查网络连接状态
                     3. 尝试使用标准测试URL
+                    
+                    🔍 请求详情：
+                    • API URL: \(url.absoluteString)
                     """
                     return
                 }
                 
+                // 检查HTTP状态码
+                let httpResponse = response as? HTTPURLResponse
+                let statusCode = httpResponse?.statusCode ?? 0
+                
                 guard let data = data else {
-                    self.testResult = "❌ 没有收到响应数据"
+                    self.testResult = """
+                    ❌ 没有收到响应数据
+                    
+                    🔍 调试信息：
+                    • HTTP状态码: \(statusCode)
+                    • 请求URL: \(url.absoluteString)
+                    """
                     return
                 }
                 
+                // 打印原始响应用于调试
+                let responseString = String(data: data, encoding: .utf8) ?? "无法解码响应"
+                print("📦 API原始响应: \(responseString)")
+                print("📡 HTTP状态码: \(statusCode)")
+                
                 do {
+                    // 解析后端的实际响应格式
                     if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                         if let success = json["success"] as? Bool, success {
-                            let stockData = json["data"] as? [String: Any] ?? [:]
-                            let productId = stockData["productId"] as? String ?? "未知"
-                            let productName = stockData["productName"] as? String ?? "未知"
-                            let inStock = stockData["inStock"] as? Bool ?? false
-                            let stockReason = stockData["stockReason"] as? String ?? "未知"
-                            let price = stockData["price"] as? String ?? "未知"
-                            let timestamp = stockData["timestamp"] as? String ?? "未知"
-                            let debugInfo = stockData["debug"] as? [String: Any] ?? [:]
+                            // 后端直接返回数据，不是嵌套在data字段中
+                            let productId = json["productId"] as? String ?? "未知"
+                            let productName = json["productName"] as? String ?? "未知"
+                            let inStock = json["inStock"] as? Bool ?? false
+                            let stockReason = json["stockReason"] as? String ?? "未知"
+                            let price = json["price"] as? String ?? "未知"
+                            let timestamp = json["timestamp"] as? String ?? "未知"
+                            let debugInfo = json["debug"] as? [String: Any] ?? [:]
                             
                             self.testResult = """
                             ✅ 后端API测试成功！
@@ -428,27 +471,48 @@ struct SettingsView: View {
                             
                             🔍 调试信息：
                             \(debugInfo["hasAddToCartButton"] as? Bool == true ? "• 找到加入购物车按钮" : "• 未找到加入购物车按钮")
-                            \(debugInfo["hasDisabledButton"] as? Bool == true ? "• 找到禁用按钮" : "• 未找到禁用按钮")
+                            \(debugInfo["isButtonDisabled"] as? Bool == true ? "• 找到禁用按钮" : "• 未找到禁用按钮")
                             \(debugInfo["hasSoldOutText"] as? Bool == true ? "• 找到售罄文本" : "• 未找到售罄文本")
                             \((debugInfo["buttonText"] as? String)?.isEmpty == false ? "• 按钮文本: \(debugInfo["buttonText"] as? String ?? "")" : "• 无按钮文本")
                             
                             🎉 API工作正常，使用简单解析方案！
                             """
                         } else {
-                            let errorMsg = json["error"] as? String ?? "未知错误"
+                            let errorMsg = json["error"] as? String ?? json["message"] as? String ?? "未知错误"
                             self.testResult = """
                             ❌ 后端API返回错误
                             
                             错误信息: \(errorMsg)
                             
+                            🔍 调试信息：
+                            • HTTP状态码: \(statusCode)
+                            • 请求URL: \(url.absoluteString)
+                            • 原始响应: \(responseString.prefix(500))
+                            
                             这可能是网站结构变化或反爬措施导致的。
                             """
                         }
                     } else {
-                        self.testResult = "❌ 无法解析API响应"
+                        self.testResult = """
+                        ❌ 无法解析API响应
+                        
+                        🔍 调试信息：
+                        • HTTP状态码: \(statusCode)
+                        • 响应长度: \(data.count) 字节
+                        • 原始响应: \(responseString.prefix(500))
+                        """
                     }
                 } catch {
-                    self.testResult = "❌ 解析响应数据失败: \(error.localizedDescription)"
+                    self.testResult = """
+                    ❌ 解析响应数据失败
+                    
+                    错误信息: \(error.localizedDescription)
+                    
+                    🔍 调试信息：
+                    • HTTP状态码: \(statusCode)
+                    • 响应长度: \(data.count) 字节
+                    • 原始响应: \(responseString.prefix(500))
+                    """
                 }
             }
         }.resume()
@@ -495,7 +559,8 @@ struct SettingsView: View {
         isTestingURL = true
         testResult = "正在测试简单API..."
         
-        guard let url = URL(string: "\(backendURL)/api/check-stock-simple?productId=1707") else {
+        // 使用正确的API端点和产品ID
+        guard let url = URL(string: "\(backendURL)/api/check-stock?productId=1991") else {
             testResult = "❌ 无效的后端URL"
             isTestingURL = false
             return
@@ -503,7 +568,7 @@ struct SettingsView: View {
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 30.0
+        request.timeoutInterval = 90.0
         request.addValue("application/json", forHTTPHeaderField: "Accept")
         
         URLSession.shared.dataTask(with: request) { data, response, error in
@@ -532,11 +597,11 @@ struct SettingsView: View {
                 do {
                     if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                         if let success = json["success"] as? Bool, success {
-                            let data = json["data"] as? [String: Any] ?? [:]
-                            let productName = data["productName"] as? String ?? "未知"
-                            let inStock = data["inStock"] as? Bool ?? false
-                            let stockReason = data["stockReason"] as? String ?? "未知"
-                            let price = data["price"] as? String ?? "未知"
+                            // 使用正确的响应格式
+                            let productName = json["productName"] as? String ?? "未知"
+                            let inStock = json["inStock"] as? Bool ?? false
+                            let stockReason = json["stockReason"] as? String ?? "未知"
+                            let price = json["price"] as? String ?? "未知"
                             
                             self.testResult = """
                             ✅ 简单API测试成功！
@@ -551,7 +616,7 @@ struct SettingsView: View {
                             这意味着应用可以使用备用方案检查库存。
                             """
                         } else {
-                            let errorMsg = json["error"] as? String ?? "未知错误"
+                            let errorMsg = json["error"] as? String ?? json["message"] as? String ?? "未知错误"
                             self.testResult = """
                             ❌ 简单API返回错误
                             

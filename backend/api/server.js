@@ -8,7 +8,7 @@ const simpleStockHandler = require('./check-stock-simple.js');
 const puppeteerStockHandler = require('./check-stock-puppeteer.js');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
 // 中间件
 app.use(cors());
